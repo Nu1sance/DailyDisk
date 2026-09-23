@@ -84,7 +84,7 @@ public struct SystemEventStoreUUIDProvider: EventStoreUUIDIdentifying {
     public init() {}
 
     public func eventStoreUUID(deviceID: UInt64) -> UUID? {
-        guard let nativeDeviceID = dev_t(exactly: deviceID),
+        guard let nativeDeviceID = nativeDeviceID(from: deviceID),
             let value = FSEventsCopyUUIDForDevice(nativeDeviceID)
         else { return nil }
         let string = CFUUIDCreateString(kCFAllocatorDefault, value) as String
@@ -92,7 +92,7 @@ public struct SystemEventStoreUUIDProvider: EventStoreUUIDIdentifying {
     }
 
     public func latestEventID(deviceID: UInt64) -> UInt64? {
-        guard let nativeDeviceID = dev_t(exactly: deviceID) else { return nil }
+        guard let nativeDeviceID = nativeDeviceID(from: deviceID) else { return nil }
         let unixTime = Date().timeIntervalSince1970
         let value = FSEventsGetLastEventIdForDeviceBeforeTime(nativeDeviceID, unixTime)
         if value != 0 { return value }
@@ -223,7 +223,7 @@ func mountedFileSystems() throws -> [MountedFileSystem] {
             source: source,
             mountPath: mountPath,
             filesystemKind: filesystemKind,
-            deviceID: UInt64(status.st_dev),
+            deviceID: UInt64(UInt32(bitPattern: status.st_dev)),
             isReadOnly: (entry.f_flags & UInt32(MNT_RDONLY)) != 0
         )
     }

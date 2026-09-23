@@ -54,7 +54,7 @@ public struct FSEventHistoryReader: EventHistoryReading {
         guard volume.inventoryMode == .full,
             volume.supportsPersistentEvents,
             volume.deviceID != 0,
-            let nativeDeviceID = dev_t(exactly: volume.deviceID)
+            let nativeDeviceID = nativeDeviceID(from: volume.deviceID)
         else {
             return UnavailableEventHistorySession(
                 volumeID: volume.id,

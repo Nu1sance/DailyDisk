@@ -288,7 +288,7 @@ private final class ScannerWalker: @unchecked Sendable {
         guard retryInterruptedPOSIX({ fstat(rootFD, &rootStatus) }) == 0 else {
             throw FileInventoryScannerError.rootMetadataFailed(path: mountPath, code: errno)
         }
-        rootDeviceID = UInt64(rootStatus.st_dev)
+        rootDeviceID = UInt64(UInt32(bitPattern: rootStatus.st_dev))
         guard volume.deviceID != 0, volume.deviceID == rootDeviceID else {
             throw FileInventoryScannerError.rootDeviceMismatch(expected: volume.deviceID, actual: rootDeviceID)
         }
@@ -382,7 +382,8 @@ private final class ScannerWalker: @unchecked Sendable {
                 currentFD = nextFD
             }
             var status = Darwin.stat()
-            guard retryInterruptedPOSIX({ fstat(currentFD, &status) }) == 0, UInt64(status.st_dev) == rootDeviceID
+            guard retryInterruptedPOSIX({ fstat(currentFD, &status) }) == 0,
+                UInt64(UInt32(bitPattern: status.st_dev)) == rootDeviceID
             else {
                 throw FileInventoryScannerError.subtreeIdentityChanged(path)
             }
@@ -510,7 +511,7 @@ private final class ScannerWalker: @unchecked Sendable {
     }
 
     private func validateDevice(_ status: Darwin.stat, path: RelativePath) throws -> Bool {
-        let deviceID = UInt64(status.st_dev)
+        let deviceID = UInt64(UInt32(bitPattern: status.st_dev))
         guard deviceID == rootDeviceID else {
             try appendError(
                 kind: .crossedVolumeBoundary,
@@ -536,7 +537,7 @@ private final class ScannerWalker: @unchecked Sendable {
             return
         }
         let metadata = try InventoryMetadata(
-            deviceID: UInt64(status.st_dev),
+            deviceID: UInt64(UInt32(bitPattern: status.st_dev)),
             inode: UInt64(status.st_ino),
             kind: fileKind(status.st_mode),
             logicalBytes: status.st_size,

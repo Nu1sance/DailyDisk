@@ -76,7 +76,7 @@ public struct DailyDiskOverheadSampler: DailyDiskOverheadSampling {
         guard stat(resolved.path, &status) == 0 else {
             throw DailyDiskOverheadError.cannotResolveRoot
         }
-        return UInt64(status.st_dev)
+        return UInt64(UInt32(bitPattern: status.st_dev))
     }
 }
 

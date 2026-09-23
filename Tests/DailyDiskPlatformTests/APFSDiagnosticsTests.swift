@@ -136,7 +136,7 @@ func overheadSampler() async throws {
         storageDomainID: domainID,
         filesystemUUID: UUID(),
         eventStoreUUID: UUID(),
-        deviceID: UInt64(rootStatus.st_dev),
+        deviceID: UInt64(UInt32(bitPattern: rootStatus.st_dev)),
         mountPath: root.path,
         displayName: "Data",
         role: .data,

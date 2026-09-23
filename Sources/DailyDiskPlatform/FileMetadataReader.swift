@@ -87,14 +87,14 @@ public actor POSIXFileMetadataReader: FileMetadataReading {
             }
         }
 
-        guard UInt64(status.st_dev) == volume.deviceID else {
+        guard UInt64(UInt32(bitPattern: status.st_dev)) == volume.deviceID else {
             throw FileMetadataReaderError.crossedVolumeBoundary(path)
         }
         guard status.st_size >= 0, status.st_blocks >= 0 else {
             throw FileMetadataReaderError.invalidMetadata(path)
         }
         let metadata = try InventoryMetadata(
-            deviceID: UInt64(status.st_dev),
+            deviceID: UInt64(UInt32(bitPattern: status.st_dev)),
             inode: UInt64(status.st_ino),
             kind: metadataFileKind(status.st_mode),
             logicalBytes: status.st_size,

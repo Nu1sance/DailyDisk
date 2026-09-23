@@ -222,7 +222,7 @@ private struct IncrementalFixture {
             storageDomainID: domain.id,
             filesystemUUID: UUID(),
             eventStoreUUID: eventStoreUUID,
-            deviceID: UInt64(status.st_dev),
+            deviceID: UInt64(UInt32(bitPattern: status.st_dev)),
             mountPath: root.path,
             displayName: "Data",
             role: .data,

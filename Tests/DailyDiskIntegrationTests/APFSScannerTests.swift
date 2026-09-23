@@ -23,7 +23,7 @@ private struct ScannerFixture {
             storageDomainID: StorageDomain.ID("scanner-domain"),
             filesystemUUID: UUID(),
             eventStoreUUID: UUID(),
-            deviceID: UInt64(status.st_dev),
+            deviceID: UInt64(UInt32(bitPattern: status.st_dev)),
             mountPath: root.path,
             displayName: "Scanner Fixture",
             role: .data,
