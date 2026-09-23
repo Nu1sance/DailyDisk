@@ -94,6 +94,18 @@ cp "$BIN_DIR/dailydiskctl" "$STAGING_APP/Contents/Helpers/dailydiskctl"
 cp "$ROOT/Config/DailyDisk-Info.plist" "$STAGING_APP/Contents/Info.plist"
 cp "$ROOT/Config/PrivacyInfo.xcprivacy" "$STAGING_APP/Contents/Resources/PrivacyInfo.xcprivacy"
 
+ICON_SOURCE="$ROOT/Config/AppIcon.png"
+ICONSET="$STAGING_ROOT/DailyDisk.iconset"
+mkdir -p "$ICONSET"
+for size in 16 32 128 256 512; do
+    sips -z "$size" "$size" "$ICON_SOURCE" \
+        --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
+    double_size=$((size * 2))
+    sips -z "$double_size" "$double_size" "$ICON_SOURCE" \
+        --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
+done
+iconutil --convert icns --output "$STAGING_APP/Contents/Resources/DailyDisk.icns" "$ICONSET"
+
 for resourceBundle in "$BIN_DIR"/DailyDisk_*.bundle; do
     if [[ -d "$resourceBundle" ]]; then
         cp -R "$resourceBundle" "$STAGING_APP/Contents/Resources/"
