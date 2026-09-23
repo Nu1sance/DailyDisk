@@ -439,6 +439,8 @@ public actor SQLiteReportStore {
                 continue
             }
             let accounting = report.accounting
+            let physicalUsedDelta = optionalInt64(statement, column: 7)
+            let physicalUnattributedDelta = optionalInt64(statement, column: 8)
             let matches =
                 report.runID == ScanRun.ID(runUUID)
                 && report.storageDomainID == StorageDomain.ID(domain)
@@ -447,8 +449,8 @@ public actor SQLiteReportStore {
                 && accounting.reconciliationCorrection == statement.columnInt64(4)
                 && accounting.reconciledIndexedDelta == statement.columnInt64(5)
                 && accounting.dailyDiskOverheadDelta == statement.columnInt64(6)
-                && optionalInt64(statement, column: 7) == accounting.physicalUsedDelta
-                && optionalInt64(statement, column: 8) == accounting.physicalUnattributedDelta
+                && physicalUsedDelta == accounting.physicalUsedDelta
+                && physicalUnattributedDelta == accounting.physicalUnattributedDelta
             if !matches { violations += 1 }
         }
         return violations

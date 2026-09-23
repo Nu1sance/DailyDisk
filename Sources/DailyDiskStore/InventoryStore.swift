@@ -3626,11 +3626,13 @@ extension SQLiteInventoryStore {
         try statement.bind(sample.storageDomainID.rawValue, at: 2)
         try statement.bind(sample.sampledAt.timeIntervalSince1970, at: 3)
         guard try statement.step() else { return false }
+        let importantAvailable = optionalInt64(statement, column: 3)
+        let opportunisticAvailable = optionalInt64(statement, column: 4)
         return statement.columnInt64(0) == sample.capacityBytes
             && statement.columnInt64(1) == sample.usedBytes
             && statement.columnInt64(2) == sample.availableBytes
-            && optionalInt64(statement, column: 3) == sample.importantUsageAvailableBytes
-            && optionalInt64(statement, column: 4) == sample.opportunisticUsageAvailableBytes
+            && importantAvailable == sample.importantUsageAvailableBytes
+            && opportunisticAvailable == sample.opportunisticUsageAvailableBytes
     }
 
     fileprivate func latestSample(
