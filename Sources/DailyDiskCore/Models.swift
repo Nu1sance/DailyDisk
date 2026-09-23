@@ -842,7 +842,7 @@ public struct StorageSample: Codable, Equatable, Sendable {
         importantUsageAvailableBytes: Int64? = nil,
         opportunisticUsageAvailableBytes: Int64? = nil
     ) throws {
-        let values = [
+        let values: [Int64] = [
             capacityBytes,
             usedBytes,
             availableBytes,
