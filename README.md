@@ -183,3 +183,7 @@ See:
 - [`Docs/Testing.md`](Docs/Testing.md)
 
 DailyDisk is available under the [MIT License](LICENSE).
+
+### Growth chart interpretation
+
+Overview and report details keep their source lists and add a ring chart for up to five non-overlapping positive entries from the stored ranking. Ancestors and duplicate paths are excluded before calculating percentages. The denominator is only the displayed subset, not all file growth or the physical disk delta. Negative file changes and unattributed APFS space do not become pie slices. The overview separately explains `physical delta = net file delta + unattributed delta + DailyDisk overhead`. Fixed system-directory descriptions (for example diagnostics logs below `private/var/db/diagnostics`) appear only after session path disclosure; hidden paths remain hidden in the chart and legend.

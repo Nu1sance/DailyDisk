@@ -159,36 +159,21 @@ struct StatusView: View {
             if report.accounting.physicalUsedDelta != nil {
                 HStack(spacing: 32) {
                     summaryMetric("文件变化", report.accounting.reconciledIndexedDelta)
-                    summaryMetric("其他空间变化", report.accounting.physicalUnattributedDelta)
+                    summaryMetric("未归因空间", report.accounting.physicalUnattributedDelta)
                     summaryMetric("DailyDisk 自身", report.accounting.dailyDiskOverheadDelta)
                 }
+                Text("磁盘净变化 = 文件净变化 + 未归因空间 + DailyDisk 自身。文件净变化包含增长与释放；未归因空间可能来自快照、APFS 元数据、共享块或无法读取的内容，不能直接归到某个文件夹。")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Divider()
                 HStack {
-                    Text("主要增长来源").font(.headline)
+                    Text("文件增长来源与占比").font(.headline)
                     Spacer()
                     if !controller.discloseReportPaths, !report.largestGrowth.isEmpty {
                         Button("显示路径") { confirmDisclosure = true }.buttonStyle(.link)
                     }
                 }
-                let sources = report.specificGrowthSources
-                if sources.isEmpty {
-                    Text("这次没有记录到文件占用增长。").foregroundStyle(.secondary)
-                } else {
-                    ForEach(Array(sources.prefix(5).enumerated()), id: \.offset) { index, source in
-                        HStack(spacing: 14) {
-                            Image(systemName: "doc").foregroundStyle(.secondary)
-                            Text(
-                                controller.discloseReportPaths
-                                    ? reversibleDisplayPath(source.path) : "增长来源 \(index + 1) · 路径已隐藏"
-                            )
-                            .lineLimit(2).textSelection(.enabled)
-                            Spacer(minLength: 12)
-                            Text(signedBytes(source.allocatedDelta)).monospacedDigit().fontWeight(.medium)
-                        }
-                    }
-                    Text("优先显示更具体的路径；文件与上级目录可能重叠，不可相加。")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
+                GrowthBreakdownView(ranking: report.largestGrowth, disclosePaths: controller.discloseReportPaths)
+
             }
             if report.coverage.unreadablePathCount > 0 {
                 Label("有 \(report.coverage.unreadablePathCount.formatted()) 处无法读取，结果未覆盖全部文件。", systemImage: "lock")
@@ -237,15 +222,4 @@ struct StatusView: View {
 
 func signedBytes(_ value: Int64) -> String {
     (value > 0 ? "+" : "") + ByteCountFormatter.string(fromByteCount: value, countStyle: .file)
-}
-
-extension DailyReport {
-    /// Remove broad ancestors only when this stored ranking also has a more specific explanation.
-    var specificGrowthSources: [RankedPathChange] {
-        largestGrowth.filter { candidate in
-            !largestGrowth.contains { other in
-                candidate.path != other.path && PathPolicy.isEqual(other.path, orDescendantOf: candidate.path)
-            }
-        }
-    }
 }

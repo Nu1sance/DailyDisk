@@ -23,6 +23,7 @@ struct ReportDetailView: View {
                 )
                 .foregroundStyle(.secondary)
                 pathControls
+                GrowthBreakdownView(ranking: report.largestGrowth, disclosePaths: controller.discloseReportPaths)
                 rankedSection("增长来源", values: report.largestGrowth, color: .blue)
                 rankedSection("释放空间", values: report.largestShrinkage, color: .green)
                 DisclosureGroup("核算与诊断详情") {
