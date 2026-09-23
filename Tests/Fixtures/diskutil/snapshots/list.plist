@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Snapshots</key>
+  <array>
+    <dict>
+      <key>SnapshotName</key><string>com.apple.TimeMachine.2026-08-27-101530.local</string>
+      <key>SnapshotUUID</key><string>AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA</string>
+      <key>Purgeable</key><true/>
+      <key>SnapshotSize</key><integer>4096</integer>
+    </dict>
+    <dict>
+      <key>SnapshotName</key><string>com.apple.os.update-EXAMPLE</string>
+      <key>SnapshotUUID</key><string>BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB</string>
+      <key>Purgeable</key><false/>
+    </dict>
+  </array>
+</dict>
+</plist>

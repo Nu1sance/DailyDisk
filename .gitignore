@@ -1,0 +1,66 @@
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Xcode
+DerivedData/
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcuserstate
+
+# Built application and local configuration
+build/
+.dist/
+.env
+Config/Local.xcconfig
+
+# Runtime data
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+Logs/
+Reports/
+
+# macOS
+.DS_Store
+
+# Local tooling
+.pi/
+
+# Environment variants and local agent configuration
+.env.*
+!.env.example
+!.env.sample
+.codex/
+.agents/
+
+# Signing identities and provisioning (never publish private credentials)
+*.p12
+*.pfx
+*.key
+*.pem
+*.cer
+*.p8
+*.mobileprovision
+*.provisionprofile
+*.keychain
+*.keychain-db
+
+# Packaged binaries and debug symbols, including custom OUTPUT_DIR builds
+*.app/
+*.dSYM/
+*.dmg
+*.pkg
+*.xcarchive/
+
+# Additional database sidecars and private diagnostic exports
+*.sqlite-journal
+*.sqlite3
+*.sqlite3-*
+*.db-shm
+*.db-wal
+*.db-journal
+*.log
+*.jsonl
+*.ips

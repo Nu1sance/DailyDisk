@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Containers</key>
+  <array>
+    <dict>
+      <key>APFSContainerUUID</key><string>AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA</string>
+      <key>CapacityCeiling</key><integer>1000</integer>
+      <key>CapacityFree</key><integer>400</integer>
+      <key>ContainerReference</key><string>disk3</string>
+      <key>PhysicalStores</key>
+      <array><dict><key>DeviceIdentifier</key><string>disk0s2</string></dict></array>
+      <key>Volumes</key>
+      <array>
+        <dict>
+          <key>APFSVolumeUUID</key><string>11111111-1111-1111-1111-111111111111</string>
+          <key>CapacityInUse</key><integer>100</integer>
+          <key>DeviceIdentifier</key><string>disk3s1</string>
+          <key>Name</key><string>Macintosh HD</string>
+          <key>Roles</key><array><string>System</string></array>
+        </dict>
+        <dict>
+          <key>APFSVolumeUUID</key><string>22222222-2222-2222-2222-222222222222</string>
+          <key>CapacityInUse</key><integer>450</integer>
+          <key>DeviceIdentifier</key><string>disk3s5</string>
+          <key>Name</key><string>Data</string>
+          <key>Roles</key><array><string>Data</string></array>
+        </dict>
+        <dict>
+          <key>APFSVolumeUUID</key><string>33333333-3333-3333-3333-333333333333</string>
+          <key>CapacityInUse</key><integer>50</integer>
+          <key>DeviceIdentifier</key><string>disk3s6</string>
+          <key>Name</key><string>VM</string>
+          <key>Roles</key><array><string>VM</string></array>
+        </dict>
+      </array>
+    </dict>
+    <dict>
+      <key>APFSContainerUUID</key><string>BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB</string>
+      <key>CapacityCeiling</key><integer>2000</integer>
+      <key>CapacityFree</key><integer>1500</integer>
+      <key>ContainerReference</key><string>disk5</string>
+      <key>PhysicalStores</key>
+      <array><dict><key>DeviceIdentifier</key><string>disk4s2</string></dict></array>
+      <key>Volumes</key>
+      <array>
+        <dict>
+          <key>APFSVolumeUUID</key><string>44444444-4444-4444-4444-444444444444</string>
+          <key>CapacityInUse</key><integer>500</integer>
+          <key>DeviceIdentifier</key><string>disk5s1</string>
+          <key>Name</key><string>External Data</string>
+          <key>Roles</key><array><string>Data</string></array>
+        </dict>
+      </array>
+    </dict>
+  </array>
+</dict>
+</plist>

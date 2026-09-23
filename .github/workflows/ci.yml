@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Swift version
+        run: swift --version
+      - name: Validate configuration property lists
+        run: plutil -lint Config/*.plist Config/*.entitlements Config/*.xcprivacy
+      - name: Build
+        run: swift build
+      - name: Test
+        run: swift test
+      - name: Check CLI behavior
+        run: |
+          test "$(swift run --skip-build dailydiskctl version)" = "0.1.0"
+          test "$(swift run --skip-build dailydiskctl minimum-system-version)" = "15.0"
+          swift run --skip-build dailydiskctl sqlite-version | grep -E '^[0-9]+\.[0-9]+'
+          if swift run --skip-build dailydiskctl version unexpected; then
+            echo "CLI accepted an unexpected argument" >&2
+            exit 1
+          fi
+      - name: Reject implicit ad-hoc install identity
+        run: |
+          if Scripts/build-app.sh >/tmp/unexpected-build.log 2>&1; then
+            echo "build unexpectedly accepted implicit ad-hoc signing" >&2
+            exit 1
+          fi
+          grep -q 'persistent CODE_SIGN_IDENTITY is required' /tmp/unexpected-build.log
+      - name: Lint LaunchAgent
+        run: Scripts/lint-launch-agent.sh
+      - name: Assemble explicitly development-only ad-hoc signed app
+        run: ALLOW_ADHOC_SIGNING=1 Scripts/build-app.sh
+      - name: Verify app bundle
+        run: |
+          APP=build/DailyDisk.app
+          test -x "$APP/Contents/MacOS/DailyDisk"
+          test -x "$APP/Contents/Helpers/DailyDiskAgent"
+          test -x "$APP/Contents/Helpers/dailydiskctl"
+          test "$(plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist")" = "0.1.0"
+          test "$(plutil -extract LSMinimumSystemVersion raw "$APP/Contents/Info.plist")" = "15.0"
+          test "$($APP/Contents/Helpers/dailydiskctl version)" = "0.1.0"
+          codesign --verify --deep --strict "$APP"
+          cmp App/DailyDisk/LaunchAgents/io.github.xiuyuwu.DailyDisk.agent.plist \
+            "$APP/Contents/Library/LaunchAgents/io.github.xiuyuwu.DailyDisk.agent.plist"
+          DAILYDISK_DRY_RUN=1 "$APP/Contents/Helpers/DailyDiskAgent"
+          codesign -dvv "$APP" 2>&1 | grep -E 'flags=.*runtime'
+          codesign -dvv "$APP/Contents/Helpers/DailyDiskAgent" 2>&1 | grep -E 'flags=.*runtime'
+          codesign -dvv "$APP/Contents/Helpers/dailydiskctl" 2>&1 | grep -E 'flags=.*runtime'
+          if otool -L "$APP/Contents/MacOS/DailyDisk" "$APP/Contents/Helpers/DailyDiskAgent" "$APP/Contents/Helpers/dailydiskctl" | grep -F "$GITHUB_WORKSPACE/.build"; then
+            echo "App contains a runtime dependency on the SwiftPM build directory" >&2
+            exit 1
+          fi
