@@ -25,6 +25,7 @@ public enum ScanProgressPhase: String, Codable, CaseIterable, Sendable {
     case recoveringInterruptedRun
     case replayingEvents
     case scanningFiles
+    case preservingOpaqueInventory
     case catchingUpEvents
     case sealingInventory
     case reconciling
@@ -46,7 +47,7 @@ public enum ScanProgressPhase: String, Codable, CaseIterable, Sendable {
     public var allowsCancellation: Bool {
         switch self {
         case .queued, .waitingForWriter, .preparing, .discoveringStorage,
-            .recoveringInterruptedRun, .replayingEvents, .scanningFiles,
+            .recoveringInterruptedRun, .replayingEvents, .scanningFiles, .preservingOpaqueInventory,
             .catchingUpEvents, .sealingInventory, .reconciling,
             .collectingDiagnostics:
             true
@@ -64,7 +65,7 @@ public enum ScanProgressPhase: String, Codable, CaseIterable, Sendable {
         case .recoveringInterruptedRun: 3
         case .discoveringStorage: 4
         case .replayingEvents: 5
-        case .scanningFiles: 6
+        case .scanningFiles, .preservingOpaqueInventory: 6
         case .catchingUpEvents: 7
         case .sealingInventory: 8
         case .reconciling: 9
@@ -98,6 +99,8 @@ public struct ScanProgressCounters: Codable, Equatable, Sendable {
     public let indexedObjects: UInt64
     public let unreadablePaths: UInt64
     public let transientErrors: UInt64
+    public let preservedPaths: UInt64
+    public let processedOpaqueRoots: UInt64
 
     public init(
         processedEvents: UInt64 = 0,
@@ -105,7 +108,9 @@ public struct ScanProgressCounters: Codable, Equatable, Sendable {
         visitedPaths: UInt64 = 0,
         indexedObjects: UInt64 = 0,
         unreadablePaths: UInt64 = 0,
-        transientErrors: UInt64 = 0
+        transientErrors: UInt64 = 0,
+        preservedPaths: UInt64 = 0,
+        processedOpaqueRoots: UInt64 = 0
     ) {
         self.processedEvents = processedEvents
         self.affectedPaths = affectedPaths
@@ -113,6 +118,8 @@ public struct ScanProgressCounters: Codable, Equatable, Sendable {
         self.indexedObjects = indexedObjects
         self.unreadablePaths = unreadablePaths
         self.transientErrors = transientErrors
+        self.preservedPaths = preservedPaths
+        self.processedOpaqueRoots = processedOpaqueRoots
     }
 
     public func applying(_ delta: ScanProgressDelta) throws -> ScanProgressCounters {
@@ -122,7 +129,9 @@ public struct ScanProgressCounters: Codable, Equatable, Sendable {
             visitedPaths: checkedAdd(visitedPaths, delta.visitedPaths),
             indexedObjects: checkedAdd(indexedObjects, delta.indexedObjects),
             unreadablePaths: checkedAdd(unreadablePaths, delta.unreadablePaths),
-            transientErrors: checkedAdd(transientErrors, delta.transientErrors)
+            transientErrors: checkedAdd(transientErrors, delta.transientErrors),
+            preservedPaths: checkedAdd(preservedPaths, delta.preservedPaths),
+            processedOpaqueRoots: checkedAdd(processedOpaqueRoots, delta.processedOpaqueRoots)
         )
     }
 
@@ -130,6 +139,25 @@ public struct ScanProgressCounters: Codable, Equatable, Sendable {
         let (result, overflow) = lhs.addingReportingOverflow(rhs)
         guard !overflow else { throw ScanProgressError.counterOverflow }
         return result
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case processedEvents, affectedPaths, visitedPaths, indexedObjects, unreadablePaths, transientErrors
+        case preservedPaths, processedOpaqueRoots
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            processedEvents: try values.decode(UInt64.self, forKey: .processedEvents),
+            affectedPaths: try values.decode(UInt64.self, forKey: .affectedPaths),
+            visitedPaths: try values.decode(UInt64.self, forKey: .visitedPaths),
+            indexedObjects: try values.decode(UInt64.self, forKey: .indexedObjects),
+            unreadablePaths: try values.decode(UInt64.self, forKey: .unreadablePaths),
+            transientErrors: try values.decode(UInt64.self, forKey: .transientErrors),
+            preservedPaths: try values.decodeIfPresent(UInt64.self, forKey: .preservedPaths) ?? 0,
+            processedOpaqueRoots: try values.decodeIfPresent(UInt64.self, forKey: .processedOpaqueRoots) ?? 0
+        )
     }
 }
 
@@ -140,6 +168,8 @@ public struct ScanProgressDelta: Codable, Equatable, Sendable {
     public let indexedObjects: UInt64
     public let unreadablePaths: UInt64
     public let transientErrors: UInt64
+    public let preservedPaths: UInt64
+    public let processedOpaqueRoots: UInt64
 
     public init(
         processedEvents: UInt64 = 0,
@@ -147,7 +177,9 @@ public struct ScanProgressDelta: Codable, Equatable, Sendable {
         visitedPaths: UInt64 = 0,
         indexedObjects: UInt64 = 0,
         unreadablePaths: UInt64 = 0,
-        transientErrors: UInt64 = 0
+        transientErrors: UInt64 = 0,
+        preservedPaths: UInt64 = 0,
+        processedOpaqueRoots: UInt64 = 0
     ) {
         self.processedEvents = processedEvents
         self.affectedPaths = affectedPaths
@@ -155,6 +187,27 @@ public struct ScanProgressDelta: Codable, Equatable, Sendable {
         self.indexedObjects = indexedObjects
         self.unreadablePaths = unreadablePaths
         self.transientErrors = transientErrors
+        self.preservedPaths = preservedPaths
+        self.processedOpaqueRoots = processedOpaqueRoots
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case processedEvents, affectedPaths, visitedPaths, indexedObjects, unreadablePaths, transientErrors
+        case preservedPaths, processedOpaqueRoots
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            processedEvents: try values.decode(UInt64.self, forKey: .processedEvents),
+            affectedPaths: try values.decode(UInt64.self, forKey: .affectedPaths),
+            visitedPaths: try values.decode(UInt64.self, forKey: .visitedPaths),
+            indexedObjects: try values.decode(UInt64.self, forKey: .indexedObjects),
+            unreadablePaths: try values.decode(UInt64.self, forKey: .unreadablePaths),
+            transientErrors: try values.decode(UInt64.self, forKey: .transientErrors),
+            preservedPaths: try values.decodeIfPresent(UInt64.self, forKey: .preservedPaths) ?? 0,
+            processedOpaqueRoots: try values.decodeIfPresent(UInt64.self, forKey: .processedOpaqueRoots) ?? 0
+        )
     }
 }
 
@@ -504,8 +557,10 @@ public enum ScanProgressTransitionValidator {
             return next == .scanningFiles || next == .catchingUpEvents
                 || next == .sealingInventory || next == .preparing
         case .scanningFiles:
-            return next == .catchingUpEvents || next == .sealingInventory
+            return next == .preservingOpaqueInventory || next == .catchingUpEvents || next == .sealingInventory
                 || next == .preparing
+        case .preservingOpaqueInventory:
+            return next == .catchingUpEvents || next == .sealingInventory || next == .preparing
         case .catchingUpEvents:
             return next == .sealingInventory || next == .preparing
         case .sealingInventory:

@@ -296,7 +296,7 @@ final class AppController: ObservableObject {
                         await reloadInspectionAfterTerminal()
                     }
                 case .queued, .waitingForWriter, .preparing, .discoveringStorage,
-                    .recoveringInterruptedRun, .replayingEvents, .scanningFiles,
+                    .recoveringInterruptedRun, .replayingEvents, .scanningFiles, .preservingOpaqueInventory,
                     .catchingUpEvents, .sealingInventory, .reconciling,
                     .collectingDiagnostics:
                     if cancellation?.requestID == progress.requestID {

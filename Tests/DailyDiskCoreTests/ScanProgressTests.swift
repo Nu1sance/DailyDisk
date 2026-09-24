@@ -12,6 +12,7 @@ func progressPhaseOrdering() {
         .discoveringStorage,
         .replayingEvents,
         .scanningFiles,
+        .preservingOpaqueInventory,
         .catchingUpEvents,
         .sealingInventory,
         .reconciling,
@@ -154,4 +155,20 @@ func runSummaryValidation() throws {
     #expect(throws: (any Error).self) {
         _ = try JSONDecoder().decode(DailyDiskRunSummary.self, from: invalid)
     }
+}
+
+@Test("Legacy progress counters decode and opaque-preservation counts remain checked")
+func opaqueProgressCompatibility() throws {
+    let data = Data(
+        #"{"processedEvents":0,"affectedPaths":0,"visitedPaths":10,"indexedObjects":9,"unreadablePaths":1,"transientErrors":0}"#
+            .utf8)
+    let old = try JSONDecoder().decode(ScanProgressCounters.self, from: data)
+    #expect(old.preservedPaths == 0)
+    let updated = try old.applying(ScanProgressDelta(preservedPaths: 100, processedOpaqueRoots: 2))
+    #expect(try JSONDecoder().decode(ScanProgressCounters.self, from: JSONEncoder().encode(updated)) == updated)
+    #expect(throws: ScanProgressError.counterOverflow) {
+        try ScanProgressCounters(preservedPaths: .max).applying(ScanProgressDelta(preservedPaths: 1))
+    }
+    #expect(ScanProgressPhase.preservingOpaqueInventory.allowsCancellation)
+    #expect(ScanProgressTransitionValidator.canTransition(from: .preservingOpaqueInventory, to: .cancelling))
 }

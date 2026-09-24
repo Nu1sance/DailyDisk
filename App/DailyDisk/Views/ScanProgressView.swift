@@ -59,6 +59,12 @@ struct ScanProgressView: View {
                         }.font(.caption)
                     }
                 }
+                if progress.phase == .preservingOpaqueInventory {
+                    Text(
+                        "已处理 \(progress.counters.processedOpaqueRoots.formatted()) 个无法读取的目录或路径，保留 \(progress.counters.preservedPaths.formatted()) 条历史记录"
+                    )
+                    .font(.callout).monospacedDigit()
+                }
                 if progress.phase == .cleaningUpFailedRun {
                     Text("可以关闭窗口，后台会安全结束本次检查。")
                         .font(.caption).foregroundStyle(.secondary)
@@ -135,6 +141,7 @@ extension ScanProgressPhase {
         case .recoveringInterruptedRun: "正在恢复上次检查"
         case .replayingEvents: "正在读取文件变化"
         case .scanningFiles: "正在检查磁盘文件"
+        case .preservingOpaqueInventory: "正在保留无法读取目录的历史记录"
         case .catchingUpEvents: "正在补齐最新变化"
         case .sealingInventory, .reconciling: "正在核对空间变化"
         case .collectingDiagnostics: "正在检查其他空间占用"
@@ -154,6 +161,7 @@ extension ScanProgressPhase {
         case .recoveringInterruptedRun: "正在清理上次未完成的检查。文件较多时可能需要几分钟，已保存的记录会保留。"
         case .replayingEvents: "读取自上次检查以来发生变化的文件。"
         case .scanningFiles: "正在逐项读取文件大小。首次检查可能需要较长时间。"
+        case .preservingOpaqueInventory: "文件遍历已完成，正在保留本次无法读取的旧记录，避免把它们误判为删除。"
         case .catchingUpEvents: "把检查期间发生的文件变化也计入结果。"
         case .sealingInventory, .reconciling: "文件读取已完成，正在计算增长与释放的空间。"
         case .collectingDiagnostics: "检查磁盘快照及仍被占用的已删除文件。"

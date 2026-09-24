@@ -229,6 +229,7 @@ public struct FullScanCoordinator: Sendable {
                 error.kind.preservesOpaqueInventory ? error.path : nil
             }
             if previousState != nil, !opaqueRoots.isEmpty {
+                try await progressTracker.transition(to: .preservingOpaqueInventory, mode: executionMode)
                 try await store.preserveOpaqueSubtrees(
                     roots: opaqueRoots,
                     from: expectedTarget,

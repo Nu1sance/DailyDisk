@@ -562,54 +562,62 @@ public actor SQLiteInventoryStore: InventoryStoring {
             ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """
         )
-        var insertedAny = false
-        var after: RelativePath?
-        while true {
-            try await observer.checkpoint()
-            let page = try loadOverlayPage(
-                descriptor: sourceDescriptor,
-                runID: runID,
-                after: after,
-                limit: InventoryRecordBatch.maximumRecordCount
-            )
-            guard !page.isEmpty else { break }
-            after = page.last?.path.relativePath
-            try Task.checkCancellation()
-            for record in page
-            where roots.contains(where: {
-                PathPolicy.isEqual(record.path.relativePath, orDescendantOf: $0)
-            }) {
-                try objectInsert.reset()
-                try objectInsert.bind(destinationDescriptor.baseGenerationID.rawValue.uuidString, at: 1)
-                try objectInsert.bind(record.object.identity.volumeID.rawValue, at: 2)
-                try objectInsert.bind(sqliteInteger(record.object.identity.deviceID), at: 3)
-                try objectInsert.bind(sqliteInteger(record.object.identity.inode), at: 4)
-                try objectInsert.bind(record.object.kind.rawValue, at: 5)
-                try objectInsert.bind(record.object.footprint.logicalBytes, at: 6)
-                try objectInsert.bind(record.object.footprint.allocatedBytes, at: 7)
-                try objectInsert.bind(sqliteInteger(record.object.linkCount), at: 8)
-                try objectInsert.bind(record.object.modifiedAt?.timeIntervalSince1970, at: 9)
-                try objectInsert.bind(record.object.metadataChangedAt?.timeIntervalSince1970, at: 10)
-                _ = try objectInsert.step()
-
-                try pathInsert.reset()
-                try pathInsert.bind(destinationDescriptor.baseGenerationID.rawValue.uuidString, at: 1)
-                try pathInsert.bind(record.path.volumeID.rawValue, at: 2)
-                try pathInsert.bind(record.path.relativePath.bytes, at: 3)
-                try pathInsert.bind(record.path.parentPath?.bytes, at: 4)
-                try pathInsert.bind(sqliteInteger(record.path.objectIdentity.deviceID), at: 5)
-                try pathInsert.bind(sqliteInteger(record.path.objectIdentity.inode), at: 6)
-                try pathInsert.bind(record.path.classification.rawValue, at: 7)
-                _ = try pathInsert.step()
-                insertedAny = insertedAny || database.changes == 1
-            }
+        var disjointRoots: [RelativePath] = []
+        for root in Set(roots).sorted(by: { $0.bytes.lexicographicallyPrecedes($1.bytes) }) {
+            if disjointRoots.contains(where: { PathPolicy.isEqual(root, orDescendantOf: $0) }) { continue }
+            disjointRoots.append(root)
         }
-        if insertedAny {
-            try markTargetDirty(
-                runID: runID,
-                kind: destinationDescriptor.kind,
-                id: destinationDescriptor.id
-            )
+        for root in disjointRoots {
+            var after: RelativePath?
+            while true {
+                try await observer.checkpoint()
+                let page = try loadOverlayPage(
+                    descriptor: sourceDescriptor,
+                    runID: runID,
+                    after: after,
+                    limit: InventoryRecordBatch.maximumRecordCount,
+                    within: root
+                )
+                guard !page.isEmpty else { break }
+                after = page.last?.path.relativePath
+                try Task.checkCancellation()
+                var preserved: UInt64 = 0
+                try database.transaction {
+                    for record in page {
+                        try objectInsert.reset()
+                        try objectInsert.bind(destinationDescriptor.baseGenerationID.rawValue.uuidString, at: 1)
+                        try objectInsert.bind(record.object.identity.volumeID.rawValue, at: 2)
+                        try objectInsert.bind(sqliteInteger(record.object.identity.deviceID), at: 3)
+                        try objectInsert.bind(sqliteInteger(record.object.identity.inode), at: 4)
+                        try objectInsert.bind(record.object.kind.rawValue, at: 5)
+                        try objectInsert.bind(record.object.footprint.logicalBytes, at: 6)
+                        try objectInsert.bind(record.object.footprint.allocatedBytes, at: 7)
+                        try objectInsert.bind(sqliteInteger(record.object.linkCount), at: 8)
+                        try objectInsert.bind(record.object.modifiedAt?.timeIntervalSince1970, at: 9)
+                        try objectInsert.bind(record.object.metadataChangedAt?.timeIntervalSince1970, at: 10)
+                        _ = try objectInsert.step()
+
+                        try pathInsert.reset()
+                        try pathInsert.bind(destinationDescriptor.baseGenerationID.rawValue.uuidString, at: 1)
+                        try pathInsert.bind(record.path.volumeID.rawValue, at: 2)
+                        try pathInsert.bind(record.path.relativePath.bytes, at: 3)
+                        try pathInsert.bind(record.path.parentPath?.bytes, at: 4)
+                        try pathInsert.bind(sqliteInteger(record.path.objectIdentity.deviceID), at: 5)
+                        try pathInsert.bind(sqliteInteger(record.path.objectIdentity.inode), at: 6)
+                        try pathInsert.bind(record.path.classification.rawValue, at: 7)
+                        _ = try pathInsert.step()
+                        if database.changes == 1 {
+                            preserved += 1
+                        }
+                    }
+                    if preserved > 0 {
+                        try markTargetDirty(
+                            runID: runID, kind: destinationDescriptor.kind, id: destinationDescriptor.id)
+                    }
+                }
+                try await observer.checkpoint(ScanProgressDelta(preservedPaths: preserved))
+            }
+            try await observer.checkpoint(ScanProgressDelta(processedOpaqueRoots: 1))
         }
     }
 
@@ -2317,18 +2325,27 @@ extension SQLiteInventoryStore {
         within root: RelativePath? = nil
     ) throws -> [InventoryRecord] {
         var conditions: [String] = []
+        var parameter = 11
         if let root, root != .root {
             // CROSS JOIN keeps paths as the driving table: partial ANALYZE
             // statistics must not turn a narrow subtree into an object scan.
-            // The outer bounds let SQLite use the path range even when the
-            // equality/descendant union alone chooses a full generation scan.
-            conditions.append("(path >= ? AND path < ? AND (path = ? OR path >= ?))")
+            // Bound each ordered branch before merging: an outer LIMIT over
+            // an unbounded UNION can re-sort the remaining inventory per page.
+            conditions.append(
+                "(path >= ?\(parameter) AND path < ?\(parameter + 1) AND (path = ?\(parameter + 2) OR path >= ?\(parameter + 3)))"
+            )
+            parameter += 4
         }
-        if after != nil { conditions.append("path > ?") }
-        let comparison = conditions.isEmpty ? "" : "WHERE " + conditions.joined(separator: " AND ")
+        if after != nil {
+            conditions.append("path > ?\(parameter)")
+            parameter += 1
+        }
+        let comparison = conditions.isEmpty ? "" : " AND " + conditions.joined(separator: " AND ")
+        let baseBounds = comparison.replacingOccurrences(of: "path", with: "p.path")
+        let mutationBounds = comparison.replacingOccurrences(of: "path", with: "m.path")
         let statement = try database.prepare(
             """
-            WITH merged AS (
+            WITH base_page AS (
                 SELECT p.volume_id, p.path, p.parent_path, p.device_id, p.inode,
                        COALESCE(om.kind, o.kind) AS kind,
                        COALESCE(om.logical_bytes, o.logical_bytes) AS logical_bytes,
@@ -2342,33 +2359,37 @@ extension SQLiteInventoryStore {
                   ON o.generation_id = p.generation_id
                  AND o.device_id = p.device_id AND o.inode = p.inode
                 LEFT JOIN run_object_mutations om
-                  ON om.run_id = ? AND om.target_kind = ? AND om.target_id = ?
+                  ON om.run_id = ?1 AND om.target_kind = ?2 AND om.target_id = ?3
                  AND om.device_id = p.device_id AND om.inode = p.inode
-                WHERE p.generation_id = ?
+                WHERE p.generation_id = ?4
                   AND NOT EXISTS (
                       SELECT 1 FROM run_mutations m
-                      WHERE m.run_id = ? AND m.target_kind = ? AND m.target_id = ?
+                      WHERE m.run_id = ?5 AND m.target_kind = ?6 AND m.target_id = ?7
                         AND m.path = p.path
                   )
-                UNION ALL
+                  \(baseBounds)
+                ORDER BY p.path
+                LIMIT ?\(parameter)
+            ), mutation_page AS (
                 SELECT m.volume_id, m.path, m.parent_path, m.device_id, m.inode,
                        om.kind, om.logical_bytes, om.allocated_bytes, om.link_count,
                        om.modified_at, om.metadata_changed_at, m.classification
                 FROM run_mutations m
-                JOIN run_object_mutations om
+                CROSS JOIN run_object_mutations om
                   ON om.run_id = m.run_id AND om.target_kind = m.target_kind
                  AND om.target_id = m.target_id
                  AND om.device_id = m.device_id AND om.inode = m.inode
-                WHERE m.run_id = ? AND m.target_kind = ? AND m.target_id = ?
+                WHERE m.run_id = ?8 AND m.target_kind = ?9 AND m.target_id = ?10
                   AND m.operation = 'upsert'
+                  \(mutationBounds)
+                ORDER BY m.path
+                LIMIT ?\(parameter)
             )
-            SELECT volume_id, path, parent_path, device_id, inode, kind,
-                   logical_bytes, allocated_bytes, link_count,
-                   modified_at, metadata_changed_at, classification
-            FROM merged
-            \(comparison)
+            SELECT * FROM base_page
+            UNION ALL
+            SELECT * FROM mutation_page
             ORDER BY path
-            LIMIT ?
+            LIMIT ?\(parameter)
             """
         )
         try bindOverlayIdentity(statement, descriptor: descriptor, runID: runID)

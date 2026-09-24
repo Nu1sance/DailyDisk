@@ -175,4 +175,39 @@ func millionRecordInventory() async throws {
     #expect(updated.tableCounts["inventory_objects"] == Int64(count - 32))
     #expect(updated.tableCounts["canonical_attributions"] == Int64(count - 32))
 
+    // Exercise the pager used by opaque preservation and full reconciliation.
+    // The old UNION/sort/outer-LIMIT query repeated a whole-tail scan per page.
+    let recovery = ScanRun(kind: .full, reason: .manual, status: .running, startedAt: Date())
+    try await store.begin(run: recovery)
+    let recovered = try await store.createStagingGeneration(
+        volumeID: volume.id, runID: recovery.id, at: recovery.startedAt)
+    let recoveredTarget = InventoryMutationTarget.stagingGeneration(recovered.id)
+    let preservation = OpaquePerformanceObserver()
+    let preservationStart = Date()
+    try await store.preserveOpaqueSubtrees(
+        roots: [.root], from: target, to: recoveredTarget, for: recovery.id, observer: preservation
+    )
+    let preservationSeconds = Date().timeIntervalSince(preservationStart)
+    #expect(await preservation.preserved == UInt64(count - 32))
+    #expect(preservationSeconds < 120)
+    for sealedTarget in [target, recoveredTarget] {
+        try await store.finalizeCanonicalAttribution(target: sealedTarget, runID: recovery.id, consume: { _ in })
+    }
+    let diffStart = Date()
+    try await store.diff(expected: target, authoritative: recoveredTarget, runID: recovery.id) { batch in
+        #expect(batch.differences.isEmpty)
+    }
+    let diffSeconds = Date().timeIntervalSince(diffStart)
+    #expect(diffSeconds < 60)
+    print("Million-row opaque preservation: \(preservationSeconds)s; full diff: \(diffSeconds)s")
+    #expect(try await store.state(for: volume.id)?.checkpoint == nextCheckpoint)
+
+}
+
+private actor OpaquePerformanceObserver: ScanWorkObserving {
+    private(set) var preserved: UInt64 = 0
+    func checkpoint(_ delta: ScanProgressDelta) async throws {
+        try Task.checkCancellation()
+        preserved += delta.preservedPaths
+    }
 }

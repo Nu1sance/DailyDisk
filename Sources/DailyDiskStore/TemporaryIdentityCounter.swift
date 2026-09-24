@@ -5,15 +5,16 @@ import Foundation
 /// grow with the number of filesystem objects.
 public final class TemporaryIdentityCounter: @unchecked Sendable {
     private let directory: URL
-    private let database: SQLiteDatabase
-    private let insert: SQLiteStatement
+    private var database: SQLiteDatabase?
+    private var insert: SQLiteStatement?
     public private(set) var count: UInt64 = 0
 
     public init() throws {
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("DailyDisk.IdentityCounter.\(UUID().uuidString)", isDirectory: true)
         let url = directory.appendingPathComponent("identities.sqlite")
-        database = try SQLiteDatabase(url: url)
+        let database = try SQLiteDatabase(url: url)
+        self.database = database
         try database.execute(
             """
             CREATE TABLE identities (
@@ -31,11 +32,14 @@ public final class TemporaryIdentityCounter: @unchecked Sendable {
     }
 
     deinit {
-        try? database.execute("COMMIT")
+        insert = nil
+        try? database?.execute("COMMIT")
+        database = nil
         try? FileManager.default.removeItem(at: directory)
     }
 
     public func register(_ identity: FileIdentity) throws {
+        guard let database, let insert else { return }
         try insert.reset()
         try insert.bind(identity.volumeID.rawValue, at: 1)
         try insert.bind(Int64(bitPattern: identity.deviceID), at: 2)

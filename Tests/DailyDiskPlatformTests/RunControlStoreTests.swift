@@ -525,3 +525,28 @@ func fractionalProgressClock() async throws {
     #expect(try await control.activeRequest() == nil)
     #expect(try await control.latestProgress()?.phase == .completed)
 }
+
+@Test("Opaque preservation publishes persistent progress and remains cancellable with fractional timestamps")
+func persistedOpaqueProgress() async throws {
+    let root = try controlRoot()
+    defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent()) }
+    let control = try RunControlStore(rootURL: root)
+    let request = try DailyDiskRunRequest(createdAt: Date(timeIntervalSince1970: 1_790_000_000.375))
+    try await control.enqueue(request)
+    _ = try await control.claimPendingRequest()
+    let tracker = try ScanProgressTracker(
+        context: ScanProgressContext(requestID: request.requestID, trigger: .manual, startedAt: request.createdAt),
+        reporter: control, cancellationChecker: control, commitBoundary: control, publicationInterval: 0
+    )
+    for phase in [ScanProgressPhase.preparing, .discoveringStorage, .scanningFiles, .preservingOpaqueInventory] {
+        try await tracker.transition(to: phase, mode: .recoveryFull)
+    }
+    try await tracker.checkpoint(ScanProgressDelta(preservedPaths: 1_024, processedOpaqueRoots: 2))
+    let persisted = try #require(await control.latestProgress())
+    #expect(persisted.phase == .preservingOpaqueInventory)
+    #expect(persisted.counters.preservedPaths == 1_024)
+    #expect(persisted.counters.processedOpaqueRoots == 2)
+    #expect(await control.channelError() == nil)
+    try await control.requestCancellation(DailyDiskCancelRequest(requestID: request.requestID, createdAt: Date()))
+    await #expect(throws: ScanProgressError.cancelled) { try await tracker.checkpoint() }
+}

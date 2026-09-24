@@ -901,6 +901,8 @@ public actor RunControlStore: ScanProgressReporting, ScanCancellationChecking, S
             && current.indexedObjects >= previous.indexedObjects
             && current.unreadablePaths >= previous.unreadablePaths
             && current.transientErrors >= previous.transientErrors
+            && current.preservedPaths >= previous.preservedPaths
+            && current.processedOpaqueRoots >= previous.processedOpaqueRoots
     }
 
     private struct HelperIdleState: Codable {
@@ -931,7 +933,7 @@ public actor RunControlStore: ScanProgressReporting, ScanCancellationChecking, S
     private static let helperIdleKeys: Set<String> = ["version", "idle", "processID"]
     private static let counterKeys: Set<String> = [
         "processedEvents", "affectedPaths", "visitedPaths", "indexedObjects",
-        "unreadablePaths", "transientErrors",
+        "unreadablePaths", "transientErrors", "preservedPaths", "processedOpaqueRoots",
     ]
     private static let requestKeys: Set<String> = [
         "version", "requestID", "action", "requestedMode", "createdAt",
