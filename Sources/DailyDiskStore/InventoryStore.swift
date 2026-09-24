@@ -545,23 +545,6 @@ public actor SQLiteInventoryStore: InventoryStoring {
             destinationDescriptor.kind == "generation"
         else { throw StoreInvariantError.volumeMismatch }
 
-        let objectInsert = try database.prepare(
-            """
-            INSERT OR IGNORE INTO inventory_objects(
-                generation_id, volume_id, device_id, inode, kind,
-                logical_bytes, allocated_bytes, link_count,
-                modified_at, metadata_changed_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """
-        )
-        let pathInsert = try database.prepare(
-            """
-            INSERT OR IGNORE INTO inventory_paths(
-                generation_id, volume_id, path, parent_path,
-                device_id, inode, classification
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            """
-        )
         var disjointRoots: [RelativePath] = []
         for root in Set(roots).sorted(by: { $0.bytes.lexicographicallyPrecedes($1.bytes) }) {
             if disjointRoots.contains(where: { PathPolicy.isEqual(root, orDescendantOf: $0) }) { continue }
@@ -583,6 +566,23 @@ public actor SQLiteInventoryStore: InventoryStoring {
                 try Task.checkCancellation()
                 var preserved: UInt64 = 0
                 try database.transaction {
+                    let objectInsert = try database.prepare(
+                        """
+                        INSERT OR IGNORE INTO inventory_objects(
+                            generation_id, volume_id, device_id, inode, kind,
+                            logical_bytes, allocated_bytes, link_count,
+                            modified_at, metadata_changed_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """
+                    )
+                    let pathInsert = try database.prepare(
+                        """
+                        INSERT OR IGNORE INTO inventory_paths(
+                            generation_id, volume_id, path, parent_path,
+                            device_id, inode, classification
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """
+                    )
                     for record in page {
                         try objectInsert.reset()
                         try objectInsert.bind(destinationDescriptor.baseGenerationID.rawValue.uuidString, at: 1)
