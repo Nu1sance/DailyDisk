@@ -11,64 +11,49 @@ struct StatusView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                HStack(alignment: .center) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("磁盘变化").font(.system(size: 28, weight: .semibold))
-                        Text("知道空间多用了多少，也知道增长来自哪里。")
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer(minLength: 20)
-                    if !controller.scanState.isActive {
-                        Button(primaryTitle, action: primaryAction)
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.large)
-                            .disabled(!controller.hasRefreshed || controller.isRefreshing)
-                            .keyboardShortcut("r", modifiers: [.command, .shift])
-                    }
-                }
                 // Feedback always comes before the results, within the first screen.
                 activity
                 if let error = controller.errorMessage {
-                    Label(error, systemImage: "exclamationmark.triangle")
-                        .foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                    banner(error, icon: "exclamationmark.triangle.fill", color: Theme.warning)
                 }
                 if !controller.scanState.isActive { setupOrOutcome }
                 if let report = controller.latestReport {
                     result(report)
                 } else if !controller.scanState.isActive {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Image(systemName: "internaldrive").font(.system(size: 32)).foregroundStyle(.blue)
-                        Text("先记下磁盘现在的样子").font(.title2.weight(.semibold))
-                        Text("第一次检查会建立基线，文件较多时需要一些时间。下次检查起，就能看到新增和释放的空间。")
-                            .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(24)
-                    .background(.background, in: RoundedRectangle(cornerRadius: 16))
+                    emptyState
                 }
-                HStack(spacing: 6) {
-                    Image(systemName: "internaldrive")
-                    Text("内置磁盘")
-                    Text("·")
-                    Text(controller.launchAgentStatus == .enabled ? "每天 09:00 自动检查" : "启用后每天 09:00 自动检查")
-                    Spacer()
-                    if let report = controller.latestReport {
-                        Text("最近 \(report.generatedAt.formatted(date: .abbreviated, time: .shortened))")
-                    }
-                }
-                .font(.caption).foregroundStyle(.secondary)
             }
-            .padding(32)
-            .frame(maxWidth: 900, alignment: .leading)
+            .padding(.horizontal, 32)
+            .padding(.vertical, 28)
+            .frame(maxWidth: 980, alignment: .leading)
             .frame(maxWidth: .infinity)
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Theme.content)
+        .navigationTitle("概览")
+        .navigationSubtitle(subtitle)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                if !controller.scanState.isActive {
+                    Button(action: primaryAction) {
+                        Label(primaryTitle, systemImage: primaryIcon).labelStyle(.titleAndIcon)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!controller.hasRefreshed || controller.isRefreshing)
+                    .keyboardShortcut("r", modifiers: [.command, .shift])
+                }
+            }
+        }
         .confirmationDialog("显示文件路径？", isPresented: $confirmDisclosure) {
             Button("显示路径") { controller.setReportPathDisclosure(true) }
             Button("取消", role: .cancel) {}
         } message: {
             Text("路径可能包含私人文件名，仅在本次应用会话中显示。")
         }
+    }
+
+    private var subtitle: String {
+        guard let report = controller.latestReport else { return "尚未检查" }
+        return "上次检查 \(relativeDateTime(report.generatedAt))"
     }
 
     private var primaryTitle: String {
@@ -78,6 +63,14 @@ struct StatusView: View {
         if controller.launchAgentStatus != .enabled { return "启用每日检查" }
         if case .failed = controller.scanState { return "重试检查" }
         return controller.latestReport == nil ? "开始首次检查" : "立即检查"
+    }
+
+    private var primaryIcon: String {
+        if !controller.hasRefreshed { return "hourglass" }
+        if controller.fullDiskAccess.status == .likelyDenied { return "lock.open" }
+        if controller.launchAgentStatus == .requiresApproval { return "checkmark.shield" }
+        if controller.launchAgentStatus != .enabled { return "clock" }
+        return "arrow.clockwise"
     }
 
     private func primaryAction() {
@@ -95,118 +88,141 @@ struct StatusView: View {
     @ViewBuilder private var activity: some View {
         switch controller.scanState {
         case .requesting:
-            HStack(spacing: 14) {
-                ProgressView().controlSize(.small)
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("正在启动检查…").font(.headline)
-                    Text("正在连接后台任务，开始后会显示已检查的文件数。")
-                        .font(.callout).foregroundStyle(.secondary)
-                }
-            }.frame(maxWidth: .infinity, alignment: .leading).padding(22)
-                .background(.blue.opacity(0.06), in: RoundedRectangle(cornerRadius: 16))
+            waiting("正在启动检查…", "正在连接后台任务，开始后会显示已检查的文件数。")
         case .running, .cancellationRequested, .finishing:
             ScanProgressView(state: controller.scanState) { Task { await controller.cancelScan() } }
         case .externalWriter:
-            HStack(spacing: 14) {
-                ProgressView().controlSize(.small)
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("后台正在检查磁盘").font(.headline)
-                    Text("暂时无法读取详细进度，完成后结果会自动出现在这里。")
-                        .foregroundStyle(.secondary)
-                }
-            }.padding(22)
+            waiting("后台正在检查磁盘", "暂时无法读取详细进度，完成后结果会自动出现在这里。")
         default: EmptyView()
         }
     }
 
+    private func waiting(_ title: String, _ detail: String) -> some View {
+        HStack(spacing: 14) {
+            ProgressView().controlSize(.small)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.headline)
+                Text(detail).font(.callout).foregroundStyle(.secondary)
+            }
+        }
+        .card()
+    }
+
     @ViewBuilder private var setupOrOutcome: some View {
         if controller.fullDiskAccess.status == .likelyDenied {
-            note("需要允许读取磁盘", "在系统设置的“完全磁盘访问权限”中添加 DailyDisk，开启后重新打开应用。", icon: "lock", color: .orange)
+            banner(
+                "需要允许读取磁盘", "在系统设置的“完全磁盘访问权限”中添加 DailyDisk，开启后重新打开应用。",
+                icon: "lock.fill", color: Theme.warning)
         } else if controller.launchAgentStatus == .requiresApproval {
-            note("还差一步", "在“登录项与扩展”中允许 DailyDisk 后台运行，返回后会自动更新状态。", icon: "checkmark.shield", color: .orange)
+            banner(
+                "还差一步", "在“登录项与扩展”中允许 DailyDisk 后台运行，返回后会自动更新状态。",
+                icon: "checkmark.shield.fill", color: Theme.warning)
         } else if controller.launchAgentStatus != .enabled {
-            note("一次设置，每天自动检查", "启用后会开始检查，并在每天 09:00 自动运行。检查结束后后台任务会退出。", icon: "clock", color: .blue)
+            banner(
+                "一次设置，每天自动检查", "启用后会开始检查，并在每天 09:00 自动运行。检查结束后后台任务会退出。",
+                icon: "clock.fill", color: Theme.accent)
         } else {
             switch controller.scanState {
             case .cancelled:
-                note("已取消检查", "已保存的记录不受影响，可以随时重新开始。", icon: "stop.circle", color: .secondary)
+                banner("已取消检查", "已保存的记录不受影响，可以随时重新开始。", icon: "stop.circle.fill", color: .secondary)
             case .failed(let failure):
-                note("检查未完成", failureDetail(failure), icon: "exclamationmark.triangle", color: .orange)
+                banner("检查未完成", failureDetail(failure), icon: "exclamationmark.triangle.fill", color: Theme.warning)
             case .succeeded(let summary):
                 if controller.latestReport == nil
                     || !summary.reportRunIDs.contains(controller.latestReport!.runID.rawValue)
                 {
-                    note("正在读取检查结果", "后台已完成，正在等待报告可用。", icon: "doc.text", color: .secondary)
+                    banner("正在读取检查结果", "后台已完成，正在等待报告可用。", icon: "doc.text.fill", color: .secondary)
                 }
             default: EmptyView()
             }
         }
     }
 
+    private var emptyState: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Image(systemName: "internaldrive").font(.system(size: 28)).foregroundStyle(Theme.accent)
+            Text("先记下磁盘现在的样子").font(.title3.weight(.semibold))
+            Text("第一次检查会建立基线，文件较多时需要一些时间。下次检查起，就能看到新增和释放的空间。")
+                .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
+        .card(padding: 24)
+    }
+
     private func result(_ report: DailyReport) -> some View {
-        VStack(alignment: .leading, spacing: 22) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 7) {
-                    Text(report.accounting.physicalUsedDelta == nil ? "首次检查已完成" : "相比上次检查")
-                        .foregroundStyle(.secondary)
-                    Text(report.accounting.physicalUsedDelta.map(signedBytes) ?? "基线已建立")
-                        .font(.system(size: 38, weight: .semibold, design: .rounded)).monospacedDigit()
-                    Text(resultCaption(report)).foregroundStyle(.secondary)
+        let trend = controller.recentTrend(for: report)
+        return VStack(alignment: .leading, spacing: 24) {
+            ReportHeadline(report: report, previousDate: controller.previousReport(before: report)?.generatedAt)
+            if trend.count >= 2 {
+                VStack(spacing: 12) {
+                    SectionHeader("最近 \(trend.count) 次检查") {
+                        Text("累计 \(signedBytes(trend.reduce(0) { $0 &+ ($1.accounting.physicalUsedDelta ?? 0) }))")
+                    }
+                    TrendChartView(reports: trend, highlighted: report.reportIdentity)
+                        .frame(height: 120)
+                }
+            }
+            if !report.isBaseline {
+                HStack(alignment: .top, spacing: 28) {
+                    VStack(spacing: 0) {
+                        SectionHeader("增长来源") { pathToggle(report) }
+                        ChangeSourceList(
+                            ranking: report.largestGrowth, direction: .growth,
+                            disclosePaths: controller.discloseReportPaths)
+                    }
+                    .frame(maxWidth: .infinity)
+                    VStack(spacing: 0) {
+                        SectionHeader("释放空间")
+                        ChangeSourceList(
+                            ranking: report.largestShrinkage, direction: .release,
+                            disclosePaths: controller.discloseReportPaths)
+                    }
+                    .frame(minWidth: 220, maxWidth: 320)
+                }
+            }
+            HStack(spacing: 12) {
+                if report.coverage.unreadablePathCount > 0 {
+                    Label(
+                        "有 \(report.coverage.unreadablePathCount.formatted()) 处无法读取，结果未覆盖全部文件",
+                        systemImage: "lock"
+                    )
+                    .foregroundStyle(Theme.warning)
                 }
                 Spacer()
-                Image(systemName: "checkmark.circle.fill").font(.title2).foregroundStyle(.green)
+                Button("查看完整报告", action: showHistory).buttonStyle(.link)
             }
-            if report.accounting.physicalUsedDelta != nil {
-                HStack(spacing: 32) {
-                    summaryMetric("文件变化", report.accounting.reconciledIndexedDelta)
-                    summaryMetric("未归因空间", report.accounting.physicalUnattributedDelta)
-                    summaryMetric("DailyDisk 自身", report.accounting.dailyDiskOverheadDelta)
-                }
-                Text("磁盘净变化 = 文件净变化 + 未归因空间 + DailyDisk 自身。文件净变化包含增长与释放；未归因空间可能来自快照、APFS 元数据、共享块或无法读取的内容，不能直接归到某个文件夹。")
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                Divider()
-                HStack {
-                    Text("文件增长来源与占比").font(.headline)
-                    Spacer()
-                    if !controller.discloseReportPaths, !report.largestGrowth.isEmpty {
-                        Button("显示路径") { confirmDisclosure = true }.buttonStyle(.link)
+            .font(.callout)
+        }
+    }
+
+    @ViewBuilder
+    private func pathToggle(_ report: DailyReport) -> some View {
+        if !report.largestGrowth.isEmpty || !report.largestShrinkage.isEmpty {
+            Toggle(
+                "显示路径",
+                isOn: Binding(
+                    get: { controller.discloseReportPaths },
+                    set: { value in
+                        if value { confirmDisclosure = true } else { controller.setReportPathDisclosure(false) }
                     }
-                }
-                GrowthBreakdownView(ranking: report.largestGrowth, disclosePaths: controller.discloseReportPaths)
-
-            }
-            if report.coverage.unreadablePathCount > 0 {
-                Label("有 \(report.coverage.unreadablePathCount.formatted()) 处无法读取，结果未覆盖全部文件。", systemImage: "lock")
-                    .font(.callout).foregroundStyle(.orange)
-            }
-            Button("查看报告与历史", action: showHistory).buttonStyle(.link)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading).padding(24)
-        .background(.background, in: RoundedRectangle(cornerRadius: 16))
-    }
-
-    private func resultCaption(_ report: DailyReport) -> String {
-        guard let delta = report.accounting.physicalUsedDelta else {
-            return "下次检查起，这里会显示磁盘增长和具体来源。"
-        }
-        return delta > 0 ? "磁盘使用空间增加" : delta < 0 ? "磁盘使用空间减少" : "磁盘使用空间没有净变化"
-    }
-
-    private func summaryMetric(_ title: String, _ value: Int64?) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(title).font(.caption).foregroundStyle(.secondary)
-            Text(value.map(signedBytes) ?? "未知").monospacedDigit()
+                )
+            )
+            .toggleStyle(.switch)
+            .controlSize(.mini)
         }
     }
 
-    private func note(_ title: String, _ detail: String, icon: String, color: Color) -> some View {
+    private func banner(_ title: String, _ detail: String? = nil, icon: String, color: Color) -> some View {
         HStack(alignment: .top, spacing: 12) {
-            Image(systemName: icon).foregroundStyle(color)
-            VStack(alignment: .leading, spacing: 5) {
+            Image(systemName: icon).foregroundStyle(color).font(.body)
+            VStack(alignment: .leading, spacing: 4) {
                 Text(title).fontWeight(.medium)
-                Text(detail).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                if let detail {
+                    Text(detail).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
             }
-        }.font(.callout)
+        }
+        .font(.callout)
+        .card(padding: 14)
     }
 
     private func failureDetail(_ failure: AppScanFailure) -> String {
