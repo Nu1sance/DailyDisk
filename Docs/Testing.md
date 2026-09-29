@@ -388,3 +388,9 @@ The user explicitly authorized deleting old inventory. Removed the dedicated old
 After confirming the helper was idle, deleted the old runtime database, reports, logs and Control files under stable reset/writer leases, without an inventory backup. Replaced the app at its original install path with the same signing identity; all three executable designated requirements matched. Daily 09:00 registration remains intact. The registered helper started a fresh manual baseline: schema 6, seven hybrid tables, zero inherited checkpoints, one running full scan and increasing initialFull/scanningFiles counters. The new GUI was reopened, but computer-use access was unavailable. Execution was verified through persisted progress and read-only schema inspection. Initial report completion, visual acceptance and subsequent incremental acceptance remain pending; startup is not full end-to-end acceptance.
 
 These installed results supersede the earlier not-installed and compatibility-UI status statements.
+
+### Graphite frontend integration (2026-09-29)
+
+PR #3 supplies the sidebar, theme, trend chart and growth/release bars. Integration keeps its visual design while preserving schema-6 space-maintenance controls, phase-only maintenance progress, cancellation boundaries and maintenance completion feedback. The sole textual conflict was the progress counter block: preserve the maintenance conditional and apply the incoming semibold typography/card styling. No inventory/accounting or database-format change is part of this frontend integration.
+
+The integrated default concurrent suite passed 243 tests in 7.228 seconds (three opt-in workloads skipped). Format, build, LaunchAgent and whitespace checks passed. The million-row storage workload was not repeated because the storage algorithm was unchanged. Visual acceptance remains separate from compilation and automated tests.

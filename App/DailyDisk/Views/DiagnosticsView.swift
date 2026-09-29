@@ -10,7 +10,7 @@ struct DiagnosticsView: View {
             VStack(alignment: .leading, spacing: 22) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("诊断")
-                        .font(.system(size: 32, weight: .bold, design: .rounded))
+                        .font(.title2.weight(.semibold))
                     Text("检查数据库、后台任务和最近运行；复制内容始终经过脱敏。")
                         .foregroundStyle(.secondary)
                 }
