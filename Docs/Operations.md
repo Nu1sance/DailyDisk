@@ -197,3 +197,7 @@ Use a fresh database when switching this internal-beta installation to schema 6.
 ### Installed transition update (2026-09-29)
 
 The user authorized deletion of old inventory and installation with a fresh baseline. The dedicated `InventoryFormatError`, `baselineResetRequired` Control category, GUI message and manual/scheduled compatibility branches have been removed. Earlier reset-prompt descriptions are historical. No conversion or old-checkpoint reuse is implemented. The migration retains only its generic empty-database consistency precondition to prevent destructive table replacement beneath an existing checkpoint.
+
+### Missing helper after reinstall
+
+After replacing or reinstalling the app, SMAppService can still report enabled while `launchctl print` reports that the helper job is missing. A manual request then remains queued with zero progress, and the GUI eventually shows “检查未完成 / 后台任务没有继续运行”; retrying kickstart alone cannot recreate the job. On a start request, DailyDisk now distinguishes a missing job from a loaded, stopped job and repairs only the enabled-but-missing case with one SMAppService unregister/register cycle. It preserves the queued request, rechecks approval and runtime state, and attaches if RunAtLoad has already started the helper. Unknown inspection errors, registration failures and a still-missing job stop recovery; polling does not become a persistent repair loop. Existing running/idle jobs are not re-registered. No history reset is needed.

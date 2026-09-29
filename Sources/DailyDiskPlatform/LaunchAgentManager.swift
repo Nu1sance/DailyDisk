@@ -137,6 +137,15 @@ public actor LaunchAgentManager {
     public func unregister() throws { try service.unregister() }
 
     public func runtimeStatus() async throws -> LaunchAgentRuntimeStatus {
+        try await loadedRuntimeStatus()
+            ?? LaunchAgentRuntimeStatus(
+                isRunning: false, processID: nil, lastExitCode: nil, state: nil
+            )
+    }
+
+    // A missing job is different from a loaded, idle job. SMAppService may
+    // retain enabled registration metadata after the app has been replaced.
+    private func loadedRuntimeStatus() async throws -> LaunchAgentRuntimeStatus? {
         let result = try await processRunner.run(
             ProcessRequest(
                 executableURL: URL(fileURLWithPath: "/bin/launchctl"),
@@ -152,12 +161,7 @@ public actor LaunchAgentManager {
             else {
                 throw LaunchAgentManagerError.runtimeStatusUnavailable
             }
-            return LaunchAgentRuntimeStatus(
-                isRunning: false,
-                processID: nil,
-                lastExitCode: nil,
-                state: nil
-            )
+            return nil
         }
         return Self.parseRuntimeStatus(String(decoding: result.standardOutput, as: UTF8.self))
     }
@@ -169,7 +173,24 @@ public actor LaunchAgentManager {
         guard registrationStatus == .enabled else {
             throw LaunchAgentManagerError.serviceUnavailable(registrationStatus)
         }
-        var current = try await runtimeStatus()
+        var loaded = try await loadedRuntimeStatus()
+        if loaded == nil {
+            // Repair this proven registration/runtime mismatch once per start.
+            // Never unregister a merely idle or running job, or loop on failure.
+            guard Self.isStableInstallationPath(bundleURL) else {
+                throw LaunchAgentManagerError.unstableApplicationPath(bundleURL.path)
+            }
+            try service.unregister()
+            try register()
+            let repairedStatus = service.status()
+            guard repairedStatus == .enabled else {
+                throw LaunchAgentManagerError.serviceUnavailable(repairedStatus)
+            }
+            loaded = try await loadedRuntimeStatus()
+        }
+        guard var current = loaded else {
+            throw LaunchAgentManagerError.runtimeStatusUnavailable
+        }
         if current.isRunning, let currentProcessID = current.processID,
             let controlStore,
             try await controlStore.pendingRequest() != nil,

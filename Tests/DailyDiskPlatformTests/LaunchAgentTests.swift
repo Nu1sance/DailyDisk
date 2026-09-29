@@ -8,14 +8,25 @@ private final class FakeRegistrationService: LaunchAgentRegistrationServicing, @
     var currentStatus: LaunchAgentStatus
     private(set) var registerCount = 0
     private(set) var unregisterCount = 0
+    var statusAfterRegister: LaunchAgentStatus = .enabled
+    var registrationError: LaunchAgentManagerError?
+    var unregistrationError: LaunchAgentManagerError?
 
     init(status: LaunchAgentStatus) {
         currentStatus = status
     }
 
     func status() -> LaunchAgentStatus { currentStatus }
-    func register() throws { registerCount += 1 }
-    func unregister() throws { unregisterCount += 1 }
+    func register() throws {
+        registerCount += 1
+        if let registrationError { throw registrationError }
+        currentStatus = statusAfterRegister
+    }
+    func unregister() throws {
+        unregisterCount += 1
+        if let unregistrationError { throw unregistrationError }
+        currentStatus = .notRegistered
+    }
 }
 
 private final class SignalProbe: ProcessSignaling, @unchecked Sendable {
@@ -117,6 +128,8 @@ func launchAgentKickstart() async throws {
     }
     #expect(status.processID == 42)
     #expect(await runningProbe.requests.count == 1)
+    #expect(service.registerCount == 0)
+    #expect(service.unregisterCount == 0)
 }
 
 @Test("Queued request during helper shutdown is kickstarted after the idle handshake")
@@ -354,4 +367,123 @@ func launchAgentStablePath() {
         )
     )
     #expect(!LaunchAgentManager.isStableInstallationPath(URL(fileURLWithPath: "/tmp/DailyDisk.app")))
+}
+
+private func missingLaunchAgent() -> ProcessResult {
+    ProcessResult(
+        terminationStatus: 113, standardOutput: Data(),
+        standardError: Data("Could not find service in domain for user gui".utf8)
+    )
+}
+
+@Test(
+    "Reinstall recovery re-registers a missing enabled job and preserves its queued request",
+    arguments: [false, true])
+func reinstallRecoversMissingAgent(runningAfterRegistration: Bool) async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let control = try RunControlStore(rootURL: root)
+    let request = try DailyDiskRunRequest()
+    try await control.enqueue(request)
+    let persistedRequest = try await control.pendingRequest()
+    let service = FakeRegistrationService(status: .enabled)
+    let probe = LaunchctlProbe(responses: [
+        missingLaunchAgent(),
+        launchctlResult(runningAfterRegistration ? "state = running\npid = 42\n" : "state = exited\n"),
+        launchctlResult(),
+    ])
+    let manager = LaunchAgentManager(
+        service: service, bundleURL: URL(fileURLWithPath: "/Applications/DailyDisk.app"),
+        processRunner: probe, userID: 501
+    )
+    let result = try await manager.startIfNeeded(controlStore: control)
+    if runningAfterRegistration {
+        guard case .alreadyRunning(let runtime) = result else {
+            Issue.record("RunAtLoad helper should be attached without another kickstart")
+            return
+        }
+        #expect(runtime.processID == 42)
+    } else {
+        #expect(result == .started)
+    }
+    #expect(service.unregisterCount == 1)
+    #expect(service.registerCount == 1)
+    #expect(try await control.pendingRequest() == persistedRequest)
+    #expect(try await control.latestProgress()?.phase == .queued)
+    let commands = await probe.requests.map(\.arguments)
+    #expect(commands.count == (runningAfterRegistration ? 2 : 3))
+    if !runningAfterRegistration {
+        #expect(commands.last == ["kickstart", "gui/501/io.github.xiuyuwu.DailyDisk.agent"])
+    }
+}
+
+@Test(
+    "Missing-job recovery stops after one repair or when approval is required",
+    arguments: [LaunchAgentStatus.enabled, .requiresApproval])
+func reinstallRecoveryIsBounded(status: LaunchAgentStatus) async throws {
+    let service = FakeRegistrationService(status: .enabled)
+    service.statusAfterRegister = status
+    let probe = LaunchctlProbe(responses: [missingLaunchAgent(), missingLaunchAgent()])
+    let manager = LaunchAgentManager(
+        service: service, bundleURL: URL(fileURLWithPath: "/Applications/DailyDisk.app"),
+        processRunner: probe, userID: 501
+    )
+    let expected: LaunchAgentManagerError =
+        status == .enabled
+        ? .runtimeStatusUnavailable : .serviceUnavailable(status)
+    await #expect(throws: expected) { try await manager.startIfNeeded() }
+    #expect(service.unregisterCount == 1)
+    #expect(service.registerCount == 1)
+    #expect(await probe.requests.count == (status == .enabled ? 2 : 1))
+}
+
+@Test("Runtime inspection errors do not trigger registration repair")
+func reinstallDoesNotRepairUnknownFailure() async throws {
+    let service = FakeRegistrationService(status: .enabled)
+    let probe = LaunchctlProbe(responses: [launchctlResult(status: 1)])
+    let manager = LaunchAgentManager(
+        service: service, bundleURL: URL(fileURLWithPath: "/Applications/DailyDisk.app"),
+        processRunner: probe, userID: 501
+    )
+    await #expect(throws: LaunchAgentManagerError.runtimeStatusUnavailable) {
+        try await manager.startIfNeeded()
+    }
+    #expect(service.unregisterCount == 0)
+    #expect(service.registerCount == 0)
+}
+
+@Test("Missing-job recovery validates the installation path before unregistering")
+func reinstallRequiresStablePath() async throws {
+    let service = FakeRegistrationService(status: .enabled)
+    let probe = LaunchctlProbe(responses: [missingLaunchAgent()])
+    let manager = LaunchAgentManager(
+        service: service, bundleURL: URL(fileURLWithPath: "/tmp/DailyDisk.app"),
+        processRunner: probe, userID: 501
+    )
+    await #expect(throws: LaunchAgentManagerError.unstableApplicationPath("/tmp/DailyDisk.app")) {
+        try await manager.startIfNeeded()
+    }
+    #expect(service.unregisterCount == 0)
+    #expect(service.registerCount == 0)
+}
+
+@Test("Registration repair propagates failures without attempting a launch", arguments: [false, true])
+func reinstallRegistrationFailure(unregisterFails: Bool) async throws {
+    let service = FakeRegistrationService(status: .enabled)
+    if unregisterFails {
+        service.unregistrationError = .serviceUnavailable(.unknown)
+    } else {
+        service.registrationError = .serviceUnavailable(.unknown)
+    }
+    let probe = LaunchctlProbe(responses: [missingLaunchAgent()])
+    let manager = LaunchAgentManager(
+        service: service, bundleURL: URL(fileURLWithPath: "/Applications/DailyDisk.app"),
+        processRunner: probe, userID: 501
+    )
+    await #expect(throws: LaunchAgentManagerError.serviceUnavailable(.unknown)) {
+        try await manager.startIfNeeded()
+    }
+    #expect(service.unregisterCount == 1)
+    #expect(service.registerCount == (unregisterFails ? 0 : 1))
+    #expect(await probe.requests.count == 1)
 }
