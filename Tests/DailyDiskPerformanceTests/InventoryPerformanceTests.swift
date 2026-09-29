@@ -343,6 +343,74 @@ func millionRecordInventory() async throws {
     #expect(postCommitSeconds < 10)
     #expect(try await store.state(for: volume.id)?.checkpoint == postCheckpoint)
     print("Post-vacuum incremental: lookup=\(postLookupSeconds)s, commit=\(postCommitSeconds)s")
+    // Surviving canonical rows exercise object lookup; deletion-only workloads
+    // miss compatibility-view materialization in LEFT JOINs.
+    await peaks.setPhase("mixed-incremental")
+    let mixedRun = ScanRun(kind: .incremental, reason: .manual, status: .running, startedAt: Date())
+    try await store.begin(run: mixedRun)
+    func mutation(_ inode: UInt64, _ name: String, _ bytes: Int64, links: UInt64 = 1) throws -> InventoryMutation {
+        let identity = FileIdentity(volumeID: volume.id, deviceID: 1, inode: inode)
+        let path = try RelativePath(validating: pathPrefix + "/" + name)
+        return .upsert(
+            try InventoryRecord(
+                object: InventoryObject(
+                    identity: identity, kind: .regular,
+                    footprint: FileFootprint(logicalBytes: bytes, allocatedBytes: bytes),
+                    linkCount: links, modifiedAt: nil, metadataChangedAt: nil),
+                path: InventoryPath(
+                    volumeID: volume.id, relativePath: path,
+                    parentPath: parent, objectIdentity: identity)))
+    }
+    var mixedMutations: [InventoryMutation] = []
+    for index in 1000..<1512 {
+        mixedMutations.append(try mutation(UInt64(index + 1), String(format: "%07d", index), 4096))
+    }
+    for index in 0..<512 {
+        mixedMutations.append(try mutation(UInt64(1_000_001 + index), "new-\(index)", 4096))
+    }
+    for index in 2000..<2064 {
+        mixedMutations.append(
+            .remove(
+                volumeID: volume.id,
+                path: try RelativePath(validating: pathPrefix + String(format: "/%07d", index))))
+        mixedMutations.append(try mutation(UInt64(index + 1), "renamed-\(index)", 0))
+    }
+    for index in 3000..<3064 {
+        mixedMutations.append(try mutation(UInt64(index + 1), String(format: "%07d", index), 8192, links: 2))
+        mixedMutations.append(try mutation(UInt64(index + 1), "alias-\(index)", 8192, links: 2))
+    }
+    try await store.stage(mutations: mixedMutations, target: target, for: mixedRun.id)
+    let mixedSealStart = Date()
+    try await store.finalizeCanonicalAttribution(target: target, runID: mixedRun.id, consume: { _ in })
+    let mixedSealSeconds = Date().timeIntervalSince(mixedSealStart)
+    let mixedDeriveStart = Date()
+    let mixedChanges = try await store.deriveIncrementalChanges(
+        target: target, runID: mixedRun.id,
+        observer: PerformanceDeadlineObserver(deadline: Date().addingTimeInterval(10)))
+    let mixedDeriveSeconds = Date().timeIntervalSince(mixedDeriveStart)
+    #expect(mixedDeriveSeconds < 10)
+    #expect(mixedChanges.reduce(Int64(0)) { $0 + $1.allocatedDelta } == 4_718_592)
+    let mixedCheckpoint = Checkpoint(
+        volumeID: volume.id, eventStoreUUID: volume.eventStoreUUID,
+        lastCommittedEventID: 60, activeGenerationID: postCheckpoint.activeGenerationID,
+        topologyFingerprint: volume.topologyFingerprint, lastSuccessfulIncrementalAt: postTimestamp,
+        lastSuccessfulFullScanAt: postCheckpoint.lastSuccessfulFullScanAt)
+    let mixedCommit = try ScanCommit(
+        runID: mixedRun.id, runKind: .incremental, scope: scope, volumeID: volume.id,
+        activatedGenerationID: nil, previousCheckpoint: postCheckpoint, checkpoint: mixedCheckpoint,
+        eventFence: EventCursorFence(
+            volumeID: volume.id, eventStoreUUID: volume.eventStoreUUID,
+            highestFullyDeliveredEventID: 60, phase: .liveFlush, trust: .trusted),
+        changes: mixedChanges, storageSamples: [], snapshotSamples: [])
+    let mixedCommitStart = Date()
+    try await store.commit(mixedCommit, finishedAt: Date())
+    let mixedCommitSeconds = Date().timeIntervalSince(mixedCommitStart)
+    #expect(mixedCommitSeconds < 30)
+    #expect(try await store.state(for: volume.id)?.checkpoint == mixedCheckpoint)
+    let mixedCounts = try await reportStore.diagnostics().tableCounts
+    #expect(mixedCounts["inventory_paths"] == Int64(count - 64 + 512 + 64))
+    #expect(mixedCounts["inventory_objects"] == Int64(count - 64 + 512))
+    print("Mixed incremental: seal=\(mixedSealSeconds)s, derive=\(mixedDeriveSeconds)s, commit=\(mixedCommitSeconds)s")
     print("Sampled database/WAL/SHM allocation peaks (bytes): \(await peaks.values)")
 
 }
@@ -360,4 +428,12 @@ private actor SpacePeakRecorder {
     private(set) var values: [String: Int64] = [:]
     func setPhase(_ phase: String) { self.phase = phase }
     func record(_ bytes: Int64) { values[phase] = max(values[phase, default: 0], bytes) }
+}
+
+private struct PerformanceDeadlineObserver: ScanWorkObserving {
+    let deadline: Date
+    func checkpoint(_ delta: ScanProgressDelta) async throws {
+        try Task.checkCancellation()
+        guard Date() < deadline else { throw CancellationError() }
+    }
 }

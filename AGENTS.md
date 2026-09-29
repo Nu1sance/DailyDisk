@@ -518,6 +518,8 @@ Production inventory now uses integer generation/volume keys, immutable parent/n
 
 Internal-beta transition uses a fresh database; no old-inventory conversion, dedicated error type, Control category or reset-required UI branch is retained. User authorized deleting the installed old inventory on 2026-09-29. Keep the migration's empty-database precondition as a generic consistency check: dropping inventory while preserving an old checkpoint is invalid. Upgrade GUI/helper together and use the same persistent signing identity. Historical prototype-only/schema-5 and compatibility-UI statements below describe earlier rounds and are superseded by this section.
 
+Incremental attribution must join `hybrid_generations` and `hybrid_objects` directly using the integer generation key plus `(device_id, inode)`. A LEFT JOIN against the `inventory_objects` compatibility view can materialize the complete generation for every surviving candidate. Preserve outer-join behavior for newly created objects. Both per-identity and streamed overlay attribution use this rule. Path-mutation accounting likewise joins compact ordering/path/volume tables by the candidate path, avoiding a generation-wide materialization of `inventory_paths`. The million-row workload must include surviving modifications, new objects, renames and hard links; deletion-only increments bypass the expensive branch and cannot validate its performance.
+
 ## TODO
 
 ### 存储落地前的测试失败排查（2026-09-29）

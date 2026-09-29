@@ -2595,11 +2595,13 @@ extension SQLiteInventoryStore {
     ) throws -> [ChangeRecord] {
         let statement = try database.prepare(
             """
-            SELECT m.path, p.volume_id, p.device_id, p.inode,
+            SELECT m.path, v.external_id, p.device_id, p.inode,
                    m.operation, m.volume_id, m.device_id, m.inode
             FROM run_mutations m
-            LEFT JOIN inventory_paths p
-              ON p.generation_id = ? AND p.path = m.path
+            LEFT JOIN hybrid_generations g ON g.external_id = ?
+            LEFT JOIN hybrid_order d ON d.generation_id = g.id AND d.path = m.path
+            LEFT JOIN hybrid_paths p ON p.generation_id = d.generation_id AND p.path_id = d.path_id
+            LEFT JOIN hybrid_volumes v ON v.id = p.volume_id
             WHERE m.run_id = ? AND m.target_kind = ? AND m.target_id = ?
             ORDER BY m.path
             """
@@ -2832,8 +2834,11 @@ extension SQLiteInventoryStore {
                        CASE WHEN om.device_id IS NOT NULL THEN om.allocated_bytes ELSE o.allocated_bytes END,
                        c.path, c.classification
                 FROM run_canonical_attributions c
-                LEFT JOIN inventory_objects o
-                  ON o.generation_id = ?
+                -- Join compact tables directly: LEFT JOIN of the compatibility view
+                -- can materialize every object in the generation for each candidate.
+                LEFT JOIN hybrid_generations g ON g.external_id = ?
+                LEFT JOIN hybrid_objects o
+                  ON o.generation_id = g.id
                  AND o.device_id = c.device_id AND o.inode = c.inode
                 LEFT JOIN run_object_mutations om
                   ON om.run_id = c.run_id AND om.target_kind = c.target_kind
@@ -2885,8 +2890,11 @@ extension SQLiteInventoryStore {
                        CASE WHEN om.device_id IS NOT NULL THEN om.allocated_bytes ELSE o.allocated_bytes END,
                        c.path, c.classification
                 FROM run_canonical_attributions c
-                LEFT JOIN inventory_objects o
-                  ON o.generation_id = ?
+                -- Join compact tables directly: LEFT JOIN of the compatibility view
+                -- can materialize every object in the generation for each candidate.
+                LEFT JOIN hybrid_generations g ON g.external_id = ?
+                LEFT JOIN hybrid_objects o
+                  ON o.generation_id = g.id
                  AND o.device_id = c.device_id AND o.inode = c.inode
                 LEFT JOIN run_object_mutations om
                   ON om.run_id = c.run_id AND om.target_kind = c.target_kind
