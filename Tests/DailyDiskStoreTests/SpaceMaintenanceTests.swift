@@ -86,11 +86,16 @@ func retirementWindowAndPendingReport() async throws {
 func maintenanceCompactsAndPreservesBasis() async throws {
     let fixture = try await StoreFixture()
     defer { fixture.removeFiles() }
-    var records = try (0..<2000).map { index in
-        try fixture.record(
-            path: "synthetic/repeated-prefix/" + String(repeating: "long-component/", count: 8) + "\(index)",
-            inode: UInt64(index + 1), logicalBytes: 100, allocatedBytes: 128, linkCount: index == 0 ? 2 : 1
-        )
+    let prefix = "synthetic/repeated-prefix/" + String(repeating: "long-component/", count: 8)
+    var records: [InventoryRecord] = []
+    records.reserveCapacity(2001)
+    for index in 0..<2000 {
+        let path = prefix + String(index)
+        let linkCount: UInt64 = index == 0 ? 2 : 1
+        let record = try fixture.record(
+            path: path, inode: UInt64(index + 1), logicalBytes: 100,
+            allocatedBytes: 128, linkCount: linkCount)
+        records.append(record)
     }
     let rawPath = try RelativePath(validating: Data([0x66, 0xff]))
     records.append(
