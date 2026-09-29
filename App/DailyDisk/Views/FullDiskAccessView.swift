@@ -8,9 +8,9 @@ struct FullDiskAccessView: View {
         VStack(alignment: .leading, spacing: 28) {
             VStack(alignment: .leading, spacing: 6) {
                 Text("磁盘读取权限")
-                    .font(.system(size: 30, weight: .bold, design: .rounded))
+                    .font(.title2.weight(.semibold))
                 Text("DailyDisk 不会绕过 macOS 安全机制。你需要主动授予“完全磁盘访问权限”。")
-                    .font(.title3)
+                    .font(.body)
                     .foregroundStyle(.secondary)
             }
 
@@ -56,7 +56,7 @@ struct FullDiskAccessView: View {
             Text(String(number))
                 .font(.system(.body, design: .monospaced).bold())
                 .frame(width: 28, height: 28)
-                .background(.blue.opacity(0.14), in: Circle())
+                .foregroundStyle(Theme.accent).background(Theme.accent.opacity(0.12), in: Circle())
             VStack(alignment: .leading, spacing: 3) {
                 Text(title).font(.headline)
                 Text(detail).foregroundStyle(.secondary)

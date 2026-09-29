@@ -14,7 +14,7 @@ struct ScanProgressView: View {
                     ProgressView().controlSize(.small).padding(.top, 4)
                     VStack(alignment: .leading, spacing: 6) {
                         Text(isCancelling ? "正在取消检查" : progress.phase.userTitle)
-                            .font(.title2.weight(.semibold))
+                            .font(.title3.weight(.semibold))
                         Text(
                             isCancelling
                                 ? "正在清理本次临时索引。文件较多时可能需要几分钟，已保存的结果会保留。"
@@ -44,7 +44,7 @@ struct ScanProgressView: View {
                                 ? "\(progress.counters.visitedPaths.formatted()) 个文件与目录"
                                 : "\(progress.counters.processedEvents.formatted()) 条变化记录"
                         )
-                        .font(.system(size: 24, weight: .medium, design: .rounded)).monospacedDigit()
+                        .font(.system(size: 24, weight: .semibold)).monospacedDigit()
                         Text(progress.counters.visitedPaths > 0 ? "已检查" : "已读取")
                             .font(.caption).foregroundStyle(.secondary)
                     }
@@ -85,17 +85,15 @@ struct ScanProgressView: View {
                     }.font(.caption).padding(.top, 10)
                 }.font(.caption).foregroundStyle(.secondary)
             }
-            .padding(24)
-            .background(.blue.opacity(0.055), in: RoundedRectangle(cornerRadius: 16))
-            .overlay(RoundedRectangle(cornerRadius: 16).stroke(.blue.opacity(0.15)))
+            .card(padding: 22)
         }
     }
 
     private func stage(_ title: String, active: Bool) -> some View {
         Text(title).font(.caption.weight(active ? .semibold : .regular))
-            .foregroundStyle(active ? .blue : .secondary)
-            .padding(.horizontal, 12).padding(.vertical, 6)
-            .background(active ? Color.blue.opacity(0.09) : .clear, in: Capsule())
+            .foregroundStyle(active ? Theme.accent : .secondary)
+            .padding(.horizontal, 12).padding(.vertical, 5)
+            .background(active ? Theme.accent.opacity(0.12) : .clear, in: Capsule())
     }
 
     private func counter(_ label: String, _ value: UInt64) -> some View {
