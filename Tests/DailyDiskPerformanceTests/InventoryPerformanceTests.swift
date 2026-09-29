@@ -1,5 +1,6 @@
 import DailyDiskCore
 import DailyDiskStore
+import Darwin
 import Foundation
 import Testing
 
@@ -17,6 +18,21 @@ func millionRecordInventory() async throws {
         .appendingPathComponent("DailyDiskMillionRow", isDirectory: true)
         .appendingPathComponent(UUID().uuidString, isDirectory: true)
     defer { try? FileManager.default.removeItem(at: root) }
+    let peaks = SpacePeakRecorder()
+    let monitor = Task.detached {
+        while !Task.isCancelled {
+            var bytes: Int64 = 0
+            for name in ["DailyDisk.sqlite", "DailyDisk.sqlite-wal", "DailyDisk.sqlite-shm"] {
+                var metadata = stat()
+                if lstat(root.appendingPathComponent(name).path, &metadata) == 0 {
+                    bytes += Int64(metadata.st_blocks) * 512
+                }
+            }
+            await peaks.record(bytes)
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+    }
+    defer { monitor.cancel() }
     let store = try SQLiteInventoryStore(databaseURL: root.appendingPathComponent("DailyDisk.sqlite"))
     try await store.prepare()
     let domain = StorageDomain(
@@ -49,13 +65,14 @@ func millionRecordInventory() async throws {
         at: run.startedAt
     )
 
-    let parent = try RelativePath(validating: "files")
+    let pathPrefix = "synthetic/Library/Application Support/Example/Cache/RepeatedDirectoryPrefix/files"
+    let parent = try RelativePath(validating: pathPrefix)
     for batchStart in stride(from: 0, to: 1_000_000, by: 1_024) {
         let end = min(batchStart + 1_024, 1_000_000)
         var records: [InventoryRecord] = []
         records.reserveCapacity(end - batchStart)
         for index in batchStart..<end {
-            let path = try RelativePath(validating: String(format: "files/%07d", index))
+            let path = try RelativePath(validating: pathPrefix + String(format: "/%07d", index))
             let identity = FileIdentity(volumeID: volume.id, deviceID: 1, inode: UInt64(index + 1))
             records.append(
                 try InventoryRecord(
@@ -83,10 +100,11 @@ func millionRecordInventory() async throws {
     let removals = try (0..<removedCount).map { index in
         InventoryMutation.remove(
             volumeID: volume.id,
-            path: try RelativePath(validating: String(format: "files/%07d", index))
+            path: try RelativePath(validating: pathPrefix + String(format: "/%07d", index))
         )
     }
     try await store.stage(mutations: removals, target: .stagingGeneration(generation.id), for: run.id)
+    await peaks.setPhase("initial-seal")
     let counter = PerformanceCounter()
     try await store.finalizeCanonicalAttribution(
         target: .stagingGeneration(generation.id),
@@ -124,6 +142,7 @@ func millionRecordInventory() async throws {
         ],
         snapshotSamples: []
     )
+    await peaks.setPhase("initial-commit")
     try await store.commit(commit, finishedAt: finishedAt)
     let state = try await store.state(for: volume.id)
     #expect(state?.checkpoint == checkpoint)
@@ -135,12 +154,13 @@ func millionRecordInventory() async throws {
     // The committed inventory now has path statistics from orphan cleanup.
     // Narrow incremental removals must still seek paths first, not visit every
     // object for each changed subtree.
+    await peaks.setPhase("incremental")
     let incremental = ScanRun(kind: .incremental, reason: .manual, status: .running, startedAt: Date())
     try await store.begin(run: incremental)
     let lookupStarted = Date()
     for index in 500_000..<500_032 {
         try await store.stageRemovalSubtree(
-            root: RelativePath(validating: String(format: "files/%07d", index)),
+            root: RelativePath(validating: pathPrefix + String(format: "/%07d", index)),
             target: .expectedActive(volumeID: volume.id), for: incremental.id, observer: TaskOnlyScanWorkObserver()
         )
     }
@@ -177,6 +197,7 @@ func millionRecordInventory() async throws {
 
     // Exercise the pager used by opaque preservation and full reconciliation.
     // The old UNION/sort/outer-LIMIT query repeated a whole-tail scan per page.
+    await peaks.setPhase("recovery-staging-and-seal")
     let recovery = ScanRun(kind: .full, reason: .manual, status: .running, startedAt: Date())
     try await store.begin(run: recovery)
     let recovered = try await store.createStagingGeneration(
@@ -202,6 +223,128 @@ func millionRecordInventory() async throws {
     print("Million-row opaque preservation: \(preservationSeconds)s; full diff: \(diffSeconds)s")
     #expect(try await store.state(for: volume.id)?.checkpoint == nextCheckpoint)
 
+    let scope = try StorageDomainScope(domain: domain, volumes: [volume])
+    let initialSample = try StorageSample(
+        storageDomainID: domain.id, sampledAt: finishedAt,
+        capacityBytes: 1_000_000, usedBytes: 0, availableBytes: 1_000_000)
+    func publish(_ runID: ScanRun.ID, sample: StorageSample, previous: StorageSample?) async throws {
+        let report = try DailyReport(
+            runID: runID, generatedAt: sample.sampledAt, storageDomainID: domain.id,
+            accounting: SpaceAccounting.summarize(
+                changes: [], scope: scope, previousSample: previous, currentSample: sample),
+            reconciliation: nil,
+            coverage: ScanCoverage(
+                visitedPathCount: UInt64(count - 32), indexedObjectCount: UInt64(count - 32),
+                unreadablePathCount: 0, transientErrorCount: 0),
+            largestGrowth: [], largestShrinkage: [], diagnostics: [])
+        try await store.commitReport(
+            ReportCommit(
+                runID: runID, scope: scope, changes: [], previousStorageSample: previous,
+                currentStorageSample: sample, previousOverheadSample: nil, currentOverheadSample: nil, report: report))
+    }
+    try await publish(run.id, sample: initialSample, previous: nil)
+    var previousCheckpoint = nextCheckpoint
+    var previousSample = initialSample
+    // Repeat authoritative activation, retirement, expiry and native compaction.
+    // Daily incremental failure is intentionally not fixed by this workload.
+    for cycle in 0..<2 {
+        await peaks.setPhase("cycle-\(cycle + 1)-staging-and-seal")
+        let cycleRun: ScanRun
+        let cycleGeneration: InventoryGeneration
+        if cycle == 0 {
+            cycleRun = recovery
+            cycleGeneration = recovered
+        } else {
+            cycleRun = ScanRun(kind: .full, reason: .manual, status: .running, startedAt: Date())
+            try await store.begin(run: cycleRun)
+            cycleGeneration = try await store.createStagingGeneration(
+                volumeID: volume.id, runID: cycleRun.id, at: Date())
+            let staged = InventoryMutationTarget.stagingGeneration(cycleGeneration.id)
+            try await store.preserveOpaqueSubtrees(roots: [.root], from: target, to: staged, for: cycleRun.id)
+            for sealTarget in [target, staged] {
+                try await store.finalizeCanonicalAttribution(target: sealTarget, runID: cycleRun.id, consume: { _ in })
+            }
+        }
+        let stagedUsage = try await reportStore.spaceUsage()
+        let sample = try StorageSample(
+            storageDomainID: domain.id,
+            sampledAt: finishedAt.addingTimeInterval(Double(cycle + 1)),
+            capacityBytes: 1_000_000, usedBytes: 0, availableBytes: 1_000_000)
+        let next = Checkpoint(
+            volumeID: volume.id, eventStoreUUID: volume.eventStoreUUID,
+            lastCommittedEventID: UInt64(30 + cycle), activeGenerationID: cycleGeneration.id,
+            topologyFingerprint: volume.topologyFingerprint,
+            lastSuccessfulIncrementalAt: finishedAt, lastSuccessfulFullScanAt: sample.sampledAt)
+        await peaks.setPhase("cycle-\(cycle + 1)-activation")
+        let activationStart = Date()
+        try await store.commit(
+            ScanCommit(
+                runID: cycleRun.id, runKind: .full, scope: scope, volumeID: volume.id,
+                activatedGenerationID: cycleGeneration.id, previousCheckpoint: previousCheckpoint, checkpoint: next,
+                eventFence: EventCursorFence(
+                    volumeID: volume.id, eventStoreUUID: volume.eventStoreUUID,
+                    highestFullyDeliveredEventID: UInt64(30 + cycle), phase: .liveFlush, trust: .trusted),
+                changes: [], storageSamples: [sample], snapshotSamples: []), finishedAt: sample.sampledAt)
+        let activationSeconds = Date().timeIntervalSince(activationStart)
+        await peaks.setPhase("cycle-\(cycle + 1)-report")
+        try await publish(cycleRun.id, sample: sample, previous: previousSample)
+        let retained = try await reportStore.spaceUsage()
+        await peaks.setPhase("cycle-\(cycle + 1)-maintenance")
+        let maintenanceStart = Date()
+        try await store.maintainSpace(at: Date().addingTimeInterval(86410), force: true, availableBytes: { Int64.max })
+        let maintenanceSeconds = Date().timeIntervalSince(maintenanceStart)
+        let compacted = try await reportStore.spaceUsage()
+        #expect(compacted.allocatedBytes < retained.allocatedBytes)
+        #expect(try await store.state(for: volume.id)?.checkpoint == next)
+        #expect(try await reportStore.report(runID: run.id) != nil)
+        #expect(try await reportStore.report(runID: cycleRun.id) != nil)
+        let counts = try await reportStore.diagnostics().tableCounts
+        #expect(counts["inventory_generations"] == 1)
+        #expect(counts["inventory_paths"] == Int64(count - 32))
+        print(
+            "Space cycle \(cycle + 1): staged=\(stagedUsage.allocatedBytes), retained=\(retained.allocatedBytes), compacted=\(compacted.allocatedBytes), activation=\(activationSeconds)s, maintenance=\(maintenanceSeconds)s"
+        )
+        previousCheckpoint = next
+        previousSample = sample
+    }
+    await peaks.setPhase("post-vacuum-incremental")
+    let postMaintenanceRun = ScanRun(kind: .incremental, reason: .manual, status: .running, startedAt: Date())
+    try await store.begin(run: postMaintenanceRun)
+    let postLookup = Date()
+    for index in 600_000..<600_032 {
+        try await store.stageRemovalSubtree(
+            root: RelativePath(validating: pathPrefix + String(format: "/%07d", index)),
+            target: target, for: postMaintenanceRun.id, observer: TaskOnlyScanWorkObserver())
+    }
+    let postLookupSeconds = Date().timeIntervalSince(postLookup)
+    #expect(postLookupSeconds < 10)
+    try await store.finalizeCanonicalAttribution(target: target, runID: postMaintenanceRun.id, consume: { _ in })
+    let postChanges = try await store.deriveIncrementalChanges(target: target, runID: postMaintenanceRun.id)
+    #expect(postChanges.count == 32)
+    // Use an exactly representable fractional Unix timestamp. Date() may carry
+    // finer reference-epoch precision than a persisted Unix-epoch Double.
+    let postTimestamp = Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down) + 0.75)
+    let postCheckpoint = Checkpoint(
+        volumeID: volume.id, eventStoreUUID: volume.eventStoreUUID,
+        lastCommittedEventID: 50, activeGenerationID: previousCheckpoint.activeGenerationID,
+        topologyFingerprint: volume.topologyFingerprint, lastSuccessfulIncrementalAt: postTimestamp,
+        lastSuccessfulFullScanAt: previousCheckpoint.lastSuccessfulFullScanAt)
+    let postCommit = try ScanCommit(
+        runID: postMaintenanceRun.id, runKind: .incremental,
+        scope: scope, volumeID: volume.id, activatedGenerationID: nil,
+        previousCheckpoint: previousCheckpoint, checkpoint: postCheckpoint,
+        eventFence: EventCursorFence(
+            volumeID: volume.id, eventStoreUUID: volume.eventStoreUUID,
+            highestFullyDeliveredEventID: 50, phase: .liveFlush, trust: .trusted),
+        changes: postChanges, storageSamples: [], snapshotSamples: [])
+    let postCommitStart = Date()
+    try await store.commit(postCommit, finishedAt: Date())
+    let postCommitSeconds = Date().timeIntervalSince(postCommitStart)
+    #expect(postCommitSeconds < 10)
+    #expect(try await store.state(for: volume.id)?.checkpoint == postCheckpoint)
+    print("Post-vacuum incremental: lookup=\(postLookupSeconds)s, commit=\(postCommitSeconds)s")
+    print("Sampled database/WAL/SHM allocation peaks (bytes): \(await peaks.values)")
+
 }
 
 private actor OpaquePerformanceObserver: ScanWorkObserving {
@@ -210,4 +353,11 @@ private actor OpaquePerformanceObserver: ScanWorkObserving {
         try Task.checkCancellation()
         preserved += delta.preservedPaths
     }
+}
+
+private actor SpacePeakRecorder {
+    private var phase = "initial-staging"
+    private(set) var values: [String: Int64] = [:]
+    func setPhase(_ phase: String) { self.phase = phase }
+    func record(_ bytes: Int64) { values[phase] = max(values[phase, default: 0], bytes) }
 }

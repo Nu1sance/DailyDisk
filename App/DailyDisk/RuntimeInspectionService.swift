@@ -104,6 +104,11 @@ struct RuntimeInspectionService: Sendable {
         }
     }
 
+    func spaceUsage() async throws -> DatabaseSpaceUsage? {
+        guard FileManager.default.fileExists(atPath: databaseURL.path) else { return nil }
+        return try await SQLiteReportStore(databaseURL: databaseURL).spaceUsage()
+    }
+
     func report(
         runID: ScanRun.ID,
         storageDomainID: StorageDomain.ID? = nil

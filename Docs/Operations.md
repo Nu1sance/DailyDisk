@@ -94,7 +94,7 @@ During scanning:
 
 The helper owns a nonblocking exclusive `flock` on `DailyDisk.sqlite.lock`. Only one helper writer can run; the foreground GUI is never a writer. Scan writes use WAL with `synchronous = FULL`; active inventory and checkpoint switch in one SQLite transaction.
 
-On startup, abandoned `running` rows are marked interrupted and their staging targets are removed. The previous active generation/checkpoint remains intact. The most recent retired generation is retained as a short recovery window.
+On startup, abandoned `running` rows are marked interrupted and their staging targets are removed. The previous active generation/checkpoint remains intact. The most recent retired generation is retained for up to 24 hours from retirement and pruned on later idle helper work after report publication; earlier retired generations can then be removed.
 
 Read-only CLI inspection acquires a shared process lease and refuses a nonempty WAL before opening an immutable SQLite view.
 
@@ -178,3 +178,22 @@ Overview and report details keep their source lists and add a ring chart for up 
 ### Full recovery after a journal change
 
 A changed FSEvents journal UUID invalidates the saved cursor and requires full recovery. File traversal is followed by the separate cancellable `preservingOpaqueInventory` phase when previous unreadable content must be retained. Its counters report completed disjoint roots and newly preserved paths. The GUI must show this work distinctly from traversal. A bounded pager is also required during the subsequent full diff; do not diagnose unchanged traversal counters alone as a stopped helper.
+
+
+## Reclaiming DailyDisk data space
+
+Open **设置 → 诊断 → 数据占用**. **刷新占用** reads allocated managed-file space, internal reusable database space, and the last successful maintenance result. **回收数据库空间** sends a helper request; it preserves the active baseline and historical reports and does not scan files. The daily helper must be installed and approved, as for manual checks.
+
+Temporary free disk space is required (conservative check: twice the database logical size plus 1 GB). If insufficient, compaction is declined with an explicit message. Do not manually delete the SQLite/WAL files to free space. If a scan or report needs recovery, first run a normal check, then retry maintenance. Cleanup/compaction/verification can take minutes and cannot be cancelled after their boundary; the window can be closed and reopened safely. After a helper crash, the next invocation validates SQLite recovery; a manual maintenance request reports interruption rather than automatically repeating VACUUM.
+
+Automatic compaction is limited by the 1 GB / 25% / seven-day thresholds. This does not make the helper resident. Until incremental failures are resolved, full recovery scans still need staging/overlay/WAL space and may reuse or regrow free pages. “本轮自身增长” and “当前数据占用” refer to different times; maintenance never rewrites past accounting. Historical ledger retention and path-dictionary optimization remain future work.
+
+Upgrade the GUI and helper together and restart the GUI. Schema 5 is not readable by an older writer; keep the signing identity, bundle ID and installed path stable. This source change does not itself migrate or compact an installed user's database.
+
+## Switching to schema 6 during internal testing
+
+Use a fresh database when switching this internal-beta installation to schema 6. Old history and checkpoints are discarded explicitly during installation, not converted. Update the GUI/helper together and restart the GUI. The first new report is an opening balance; the next successful report begins growth comparisons.
+
+### Installed transition update (2026-09-29)
+
+The user authorized deletion of old inventory and installation with a fresh baseline. The dedicated `InventoryFormatError`, `baselineResetRequired` Control category, GUI message and manual/scheduled compatibility branches have been removed. Earlier reset-prompt descriptions are historical. No conversion or old-checkpoint reuse is implemented. The migration retains only its generic empty-database consistency precondition to prevent destructive table replacement beneath an existing checkpoint.

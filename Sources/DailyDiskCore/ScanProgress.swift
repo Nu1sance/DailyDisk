@@ -34,11 +34,18 @@ public enum ScanProgressPhase: String, Codable, CaseIterable, Sendable {
     case publishingReport
     case notifying
     case applyingRetention
+    case cleaningRetiredInventory
+    case reclaimingSpace
+    case verifyingMaintenance
     case cleaningUpFailedRun
     case cancelling
     case completed
     case cancelled
     case failed
+
+    public var isSpaceMaintenance: Bool {
+        self == .cleaningRetiredInventory || self == .reclaimingSpace || self == .verifyingMaintenance
+    }
 
     public var isTerminal: Bool {
         self == .completed || self == .cancelled || self == .failed
@@ -51,7 +58,8 @@ public enum ScanProgressPhase: String, Codable, CaseIterable, Sendable {
             .catchingUpEvents, .sealingInventory, .reconciling,
             .collectingDiagnostics:
             true
-        case .committing, .publishingReport, .notifying, .applyingRetention,
+        case .cleaningRetiredInventory, .reclaimingSpace, .verifyingMaintenance,
+            .committing, .publishingReport, .notifying, .applyingRetention,
             .cleaningUpFailedRun, .cancelling, .completed, .cancelled, .failed:
             false
         }
@@ -61,7 +69,7 @@ public enum ScanProgressPhase: String, Codable, CaseIterable, Sendable {
         switch self {
         case .queued: 0
         case .waitingForWriter: 1
-        case .preparing: 2
+        case .preparing, .cleaningRetiredInventory, .reclaimingSpace, .verifyingMaintenance: 2
         case .recoveringInterruptedRun: 3
         case .discoveringStorage: 4
         case .replayingEvents: 5
@@ -81,6 +89,9 @@ public enum ScanProgressPhase: String, Codable, CaseIterable, Sendable {
 }
 
 public enum ScanProgressErrorCategory: String, Codable, CaseIterable, Sendable {
+    case insufficientSpace
+    case maintenanceRecovery
+    case maintenanceInterrupted
     case permission
     case eventHistory
     case storageTopology
@@ -295,6 +306,7 @@ public struct ScanProgressSnapshot: Codable, Equatable, Sendable {
 
 public enum DailyDiskRunRequestAction: String, Codable, CaseIterable, Sendable {
     case scanNow
+    case reclaimSpace
 }
 
 public struct DailyDiskRunRequest: Codable, Equatable, Sendable {
@@ -422,6 +434,7 @@ public struct DailyDiskCancelRequest: Codable, Equatable, Sendable {
 }
 
 public enum DailyDiskRunTerminalState: String, Codable, CaseIterable, Sendable {
+    case maintenanceCompleted
     case succeeded
     case cancelled
     case failed
@@ -471,7 +484,7 @@ public struct DailyDiskRunSummary: Codable, Equatable, Sendable {
                 failedDomainCount == 0 && errorCategory == nil
             case .failed:
                 failedDomainCount > 0 && errorCategory != nil
-            case .skippedNotDue, .blockedByWriter:
+            case .maintenanceCompleted, .skippedNotDue, .blockedByWriter:
                 completedDomainCount == 0
                     && failedDomainCount == 0
                     && reportRunIDs.isEmpty
@@ -544,7 +557,14 @@ public enum ScanProgressTransitionValidator {
             return next == .waitingForWriter || next == .preparing
         case .waitingForWriter:
             return next == .preparing
+        case .cleaningRetiredInventory:
+            return next == .reclaimingSpace || next == .preparing
+        case .reclaimingSpace:
+            return next == .verifyingMaintenance || next == .preparing
+        case .verifyingMaintenance:
+            return next == .preparing || next == .completed
         case .preparing:
+            if next.isSpaceMaintenance || next == .completed { return true }
             return next == .recoveringInterruptedRun || next == .discoveringStorage
         case .recoveringInterruptedRun:
             return next == .discoveringStorage || next == .preparing

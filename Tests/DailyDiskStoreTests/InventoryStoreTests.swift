@@ -42,15 +42,15 @@ func orphanCleanupUsesIdentityIndex() async throws {
     )
     let database = try SQLiteDatabase(url: fixture.databaseURL, readOnly: true)
     let plan = try database.prepare(
-        "EXPLAIN QUERY PLAN DELETE FROM inventory_objects WHERE generation_id = ? AND device_id = ? AND inode = ?"
+        "EXPLAIN QUERY PLAN DELETE FROM hybrid_objects WHERE generation_id = ? AND device_id = ? AND inode = ?"
     )
-    try plan.bind(generation.id.rawValue.uuidString, at: 1)
+    try plan.bind(database.hybridGenerationKey(generation.id), at: 1)
     try plan.bind(Int64(1), at: 2)
     try plan.bind(Int64(1), at: 3)
     var boundedForeignKeyLookup = false
     while try plan.step() {
         let detail = plan.columnText(3) ?? ""
-        if detail.contains("inventory_paths"), detail.contains("device_id=?"), detail.contains("inode=?") {
+        if detail.contains("hybrid_paths"), detail.contains("device_id=?"), detail.contains("inode=?") {
             boundedForeignKeyLookup = true
         }
     }

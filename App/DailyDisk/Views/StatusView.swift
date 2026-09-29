@@ -133,7 +133,10 @@ struct StatusView: View {
             case .failed(let failure):
                 note("检查未完成", failureDetail(failure), icon: "exclamationmark.triangle", color: .orange)
             case .succeeded(let summary):
-                if controller.latestReport == nil
+                if summary.terminalState == .maintenanceCompleted {
+                    Label("空间维护已完成，可在设置的诊断页查看占用。", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                } else if controller.latestReport == nil
                     || !summary.reportRunIDs.contains(controller.latestReport!.runID.rawValue)
                 {
                     note("正在读取检查结果", "后台已完成，正在等待报告可用。", icon: "doc.text", color: .secondary)

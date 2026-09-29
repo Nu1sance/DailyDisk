@@ -15,6 +15,7 @@ struct DiagnosticsView: View {
                         .foregroundStyle(.secondary)
                 }
 
+                spaceMaintenance
                 databaseHealth
                 helperStatus
                 recentRuns
@@ -37,6 +38,51 @@ struct DiagnosticsView: View {
         }
         .task {
             if controller.inspectionSnapshot == nil { await controller.refresh() }
+            await controller.refreshSpaceUsage()
+        }
+    }
+
+    private var spaceMaintenance: some View {
+        GroupBox("数据占用") {
+            VStack(alignment: .leading, spacing: 10) {
+                if let usage = controller.spaceUsage {
+                    LabeledContent("当前数据占用", value: bytes(usage.allocatedBytes))
+                    LabeledContent("数据库可复用空间", value: bytes(usage.reusableBytes))
+                    Text("可复用空间包含在当前占用中。报告里的自身增长按检查时采样，可能与这里不同。")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if let date = usage.lastMaintenanceAt, let reclaimed = usage.lastReclaimedBytes {
+                        LabeledContent("上次维护", value: date.formatted())
+                        LabeledContent("占用减少", value: bytes(reclaimed))
+                    }
+                    if let status = usage.maintenanceStatus {
+                        Text(maintenanceStatus(status)).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                HStack {
+                    Button("刷新占用") { Task { await controller.refreshSpaceUsage() } }
+                    Button("回收数据库空间") { Task { await controller.reclaimSpace() } }
+                        .disabled(
+                            controller.scanState.isActive || controller.isVerifying || controller.spaceUsage == nil)
+                }
+                Text("保留当前基线与历史报告。压缩前需要数据库文件大小两倍另加 1 GB 的可用空间，开始后不可取消。")
+                    .font(.caption).foregroundStyle(.secondary)
+                if controller.scanState.progress?.phase.isSpaceMaintenance == true {
+                    ScanProgressView(state: controller.scanState, onCancel: {})
+                }
+            }.padding(.top, 6)
+        }
+        .onChange(of: controller.scanState.isActive) { _, active in
+            if !active { Task { await controller.refreshSpaceUsage() } }
+        }
+    }
+
+    private func maintenanceStatus(_ status: String) -> String {
+        switch status {
+        case "running": "维护进行中；若后台已停止，将在下次运行时验证恢复。"
+        case "insufficientSpace": "临时空间不足，未执行压缩。请释放空间后重试。"
+        case "interrupted": "上次维护中断，数据库已验证，未自动重试压缩。"
+        case "failed": "上次维护未完成，请查看诊断。"
+        default: "上次维护已完成。"
         }
     }
 
@@ -51,7 +97,7 @@ struct DiagnosticsView: View {
                     case .notInitialized:
                         Label("尚未建立数据库", systemImage: "circle.dotted")
                     case .waitingForWriter:
-                        Label("等待扫描完成后执行严格检查", systemImage: "hourglass")
+                        Label("等待后台任务完成后执行严格检查", systemImage: "hourglass")
                             .foregroundStyle(.orange)
                     case .verified(let verification):
                         Label(

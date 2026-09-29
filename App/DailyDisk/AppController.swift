@@ -105,7 +105,22 @@ final class AppController: ObservableObject {
         isRefreshing = false
     }
 
-    func scanNow(requestedMode: DailyDiskRequestedScanMode = .automatic) async {
+    @Published private(set) var spaceUsage: DatabaseSpaceUsage?
+
+    func refreshSpaceUsage() async {
+        do {
+            spaceUsage = try await inspectionService.spaceUsage()
+        } catch { errorMessage = "暂时无法读取数据占用，请等待后台任务结束后重试。" }
+    }
+
+    func reclaimSpace() async {
+        await scanNow(action: .reclaimSpace)
+    }
+
+    func scanNow(
+        requestedMode: DailyDiskRequestedScanMode = .automatic,
+        action: DailyDiskRunRequestAction = .scanNow
+    ) async {
         guard !scanState.isActive, !isSubmittingScanRequest else { return }
         isSubmittingScanRequest = true
         defer { isSubmittingScanRequest = false }
@@ -152,7 +167,7 @@ final class AppController: ObservableObject {
                 startProgressPolling()
                 return
             }
-            let request = try DailyDiskRunRequest(requestedMode: requestedMode)
+            let request = try DailyDiskRunRequest(action: action, requestedMode: requestedMode)
             scanState = .requesting
             trackedRequestID = request.requestID
             try await controlStore.enqueue(request)
@@ -263,7 +278,8 @@ final class AppController: ObservableObject {
             {
                 trackedRequestID = progress.requestID
                 switch progress.phase {
-                case .committing, .publishingReport, .notifying, .applyingRetention, .cleaningUpFailedRun:
+                case .cleaningRetiredInventory, .reclaimingSpace, .verifyingMaintenance,
+                    .committing, .publishingReport, .notifying, .applyingRetention, .cleaningUpFailedRun:
                     scanState = .finishing(progress)
                 case .cancelling:
                     scanState = .cancellationRequested(progress)
@@ -293,6 +309,7 @@ final class AppController: ObservableObject {
                         scanState =
                             progress.errorCategory == .writerBusy
                             ? .externalWriter : .failed(.scanFailed)
+                        applyMaintenanceError(progress.errorCategory)
                         await reloadInspectionAfterTerminal()
                     }
                 case .queued, .waitingForWriter, .preparing, .discoveringStorage,
@@ -315,9 +332,11 @@ final class AppController: ObservableObject {
             {
                 trackedRequestID = summary.requestID
                 switch summary.terminalState {
-                case .succeeded: scanState = .succeeded(summary)
+                case .maintenanceCompleted, .succeeded: scanState = .succeeded(summary)
                 case .cancelled: scanState = .cancelled(summary)
-                case .failed: scanState = .failed(.scanFailed)
+                case .failed:
+                    scanState = .failed(.scanFailed)
+                    applyMaintenanceError(summary.errorCategory)
                 case .blockedByWriter: scanState = .externalWriter
                 case .skippedNotDue: scanState = .idle
                 }
@@ -549,6 +568,15 @@ final class AppController: ObservableObject {
         let hasPending = (try? await controlStore.pendingRequest()) != nil
         guard hasActive || hasPending else { return }
         _ = try? await launchAgentManager.startIfNeeded(controlStore: controlStore)
+    }
+
+    private func applyMaintenanceError(_ category: ScanProgressErrorCategory?) {
+        switch category {
+        case .insufficientSpace: errorMessage = "临时磁盘空间不足，未执行压缩。请释放空间后重试。"
+        case .maintenanceRecovery: errorMessage = "存在未完成的检查或待发布报告，请先运行一次检查完成恢复，再回收空间。"
+        case .maintenanceInterrupted: errorMessage = "上次空间维护中断，数据库已验证。可以手动重新回收空间。"
+        default: break
+        }
     }
 
     private func reloadInspectionAfterTerminal() async {

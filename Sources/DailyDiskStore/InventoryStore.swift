@@ -9,7 +9,7 @@ public actor SQLiteInventoryStore: InventoryStoring {
     }
 
     private let processLease: ProcessLease
-    private let database: SQLiteDatabase
+    let database: SQLiteDatabase
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
@@ -197,18 +197,10 @@ public actor SQLiteInventoryStore: InventoryStoring {
             throw StoreInvariantError.volumeMismatch
         }
         try database.transaction {
-            let objectStatement = try database.prepare(Self.upsertObjectSQL)
-            let pathStatement = try database.prepare(Self.upsertPathSQL)
+            let writer = try HybridInventoryWriter(database: database, generationID: generationID)
             for (index, record) in records.enumerated() {
                 if index.isMultiple(of: 256) { try Task.checkCancellation() }
-                try objectStatement.reset()
-                try pathStatement.reset()
-                try upsert(
-                    record: record,
-                    generationID: generationID,
-                    objectStatement: objectStatement,
-                    pathStatement: pathStatement
-                )
+                try writer.write(record)
             }
             try markTargetDirty(
                 runID: ownership.runID,
@@ -566,49 +558,11 @@ public actor SQLiteInventoryStore: InventoryStoring {
                 try Task.checkCancellation()
                 var preserved: UInt64 = 0
                 try database.transaction {
-                    let objectInsert = try database.prepare(
-                        """
-                        INSERT OR IGNORE INTO inventory_objects(
-                            generation_id, volume_id, device_id, inode, kind,
-                            logical_bytes, allocated_bytes, link_count,
-                            modified_at, metadata_changed_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """
-                    )
-                    let pathInsert = try database.prepare(
-                        """
-                        INSERT OR IGNORE INTO inventory_paths(
-                            generation_id, volume_id, path, parent_path,
-                            device_id, inode, classification
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                        """
-                    )
+                    let writer = try HybridInventoryWriter(
+                        database: database, generationID: destinationDescriptor.baseGenerationID,
+                        ignoreExisting: true)
                     for record in page {
-                        try objectInsert.reset()
-                        try objectInsert.bind(destinationDescriptor.baseGenerationID.rawValue.uuidString, at: 1)
-                        try objectInsert.bind(record.object.identity.volumeID.rawValue, at: 2)
-                        try objectInsert.bind(sqliteInteger(record.object.identity.deviceID), at: 3)
-                        try objectInsert.bind(sqliteInteger(record.object.identity.inode), at: 4)
-                        try objectInsert.bind(record.object.kind.rawValue, at: 5)
-                        try objectInsert.bind(record.object.footprint.logicalBytes, at: 6)
-                        try objectInsert.bind(record.object.footprint.allocatedBytes, at: 7)
-                        try objectInsert.bind(sqliteInteger(record.object.linkCount), at: 8)
-                        try objectInsert.bind(record.object.modifiedAt?.timeIntervalSince1970, at: 9)
-                        try objectInsert.bind(record.object.metadataChangedAt?.timeIntervalSince1970, at: 10)
-                        _ = try objectInsert.step()
-
-                        try pathInsert.reset()
-                        try pathInsert.bind(destinationDescriptor.baseGenerationID.rawValue.uuidString, at: 1)
-                        try pathInsert.bind(record.path.volumeID.rawValue, at: 2)
-                        try pathInsert.bind(record.path.relativePath.bytes, at: 3)
-                        try pathInsert.bind(record.path.parentPath?.bytes, at: 4)
-                        try pathInsert.bind(sqliteInteger(record.path.objectIdentity.deviceID), at: 5)
-                        try pathInsert.bind(sqliteInteger(record.path.objectIdentity.inode), at: 6)
-                        try pathInsert.bind(record.path.classification.rawValue, at: 7)
-                        _ = try pathInsert.step()
-                        if database.changes == 1 {
-                            preserved += 1
-                        }
+                        if try writer.write(record) { preserved += 1 }
                     }
                     if preserved > 0 {
                         try markTargetDirty(
@@ -805,6 +759,10 @@ public actor SQLiteInventoryStore: InventoryStoring {
             try database.transaction {
                 if descriptor.kind == "generation" {
                     try removeOrphanObjects(generationID: descriptor.baseGenerationID)
+                    guard
+                        try database.verifyHybridOrdering(
+                            generation: database.hybridGenerationKey(descriptor.baseGenerationID)) == 0
+                    else { throw StoreInvariantError.corruptStoredValue("hybrid path ordering") }
                 }
                 let remove = try database.prepare(
                     """
@@ -830,6 +788,11 @@ public actor SQLiteInventoryStore: InventoryStoring {
                     let candidates = try incrementalCandidateIdentities(descriptor: descriptor, runID: runID)
                     for (index, identity) in candidates.enumerated() {
                         if index.isMultiple(of: 256) { try Task.checkCancellation() }
+                        guard
+                            try database.verifyHybridOrdering(
+                                generation: database.hybridGenerationKey(descriptor.baseGenerationID),
+                                identity: identity) == 0
+                        else { throw StoreInvariantError.corruptStoredValue("hybrid path ordering") }
                         if let path = try canonicalOverlayPath(
                             identity: identity,
                             descriptor: descriptor,
@@ -1033,7 +996,8 @@ public actor SQLiteInventoryStore: InventoryStoring {
                 )
                 try activate(
                     generationID: activatedGenerationID,
-                    volumeID: commit.volumeID
+                    volumeID: commit.volumeID,
+                    retiredAt: Date()
                 )
             }
 
@@ -1470,34 +1434,6 @@ extension SQLiteInventoryStore {
         var exhausted = false
     }
 
-    fileprivate static let upsertObjectSQL = """
-        INSERT INTO inventory_objects(
-            generation_id, volume_id, device_id, inode, kind,
-            logical_bytes, allocated_bytes, link_count,
-            modified_at, metadata_changed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(generation_id, device_id, inode) DO UPDATE SET
-            kind = excluded.kind,
-            logical_bytes = excluded.logical_bytes,
-            allocated_bytes = excluded.allocated_bytes,
-            link_count = excluded.link_count,
-            modified_at = excluded.modified_at,
-            metadata_changed_at = excluded.metadata_changed_at
-        """
-
-    fileprivate static let upsertPathSQL = """
-        INSERT INTO inventory_paths(
-            generation_id, volume_id, path, parent_path,
-            device_id, inode, classification
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(generation_id, path) DO UPDATE SET
-            volume_id = excluded.volume_id,
-            parent_path = excluded.parent_path,
-            device_id = excluded.device_id,
-            inode = excluded.inode,
-            classification = excluded.classification
-        """
-
     fileprivate static let stageObjectMutationSQL = """
         INSERT INTO run_object_mutations(
             run_id, target_kind, target_id, volume_id, device_id, inode,
@@ -1897,48 +1833,17 @@ extension SQLiteInventoryStore {
     }
 
     fileprivate func upsert(record: InventoryRecord, generationID: InventoryGeneration.ID) throws {
-        try upsert(
-            record: record,
-            generationID: generationID,
-            objectStatement: database.prepare(Self.upsertObjectSQL),
-            pathStatement: database.prepare(Self.upsertPathSQL)
-        )
-    }
-
-    fileprivate func upsert(
-        record: InventoryRecord,
-        generationID: InventoryGeneration.ID,
-        objectStatement: SQLiteStatement,
-        pathStatement: SQLiteStatement
-    ) throws {
-        try objectStatement.bind(generationID.rawValue.uuidString, at: 1)
-        try objectStatement.bind(record.object.identity.volumeID.rawValue, at: 2)
-        try objectStatement.bind(sqliteInteger(record.object.identity.deviceID), at: 3)
-        try objectStatement.bind(sqliteInteger(record.object.identity.inode), at: 4)
-        try objectStatement.bind(record.object.kind.rawValue, at: 5)
-        try objectStatement.bind(record.object.footprint.logicalBytes, at: 6)
-        try objectStatement.bind(record.object.footprint.allocatedBytes, at: 7)
-        try objectStatement.bind(sqliteInteger(record.object.linkCount), at: 8)
-        try objectStatement.bind(record.object.modifiedAt?.timeIntervalSince1970, at: 9)
-        try objectStatement.bind(record.object.metadataChangedAt?.timeIntervalSince1970, at: 10)
-        _ = try objectStatement.step()
-
-        try pathStatement.bind(generationID.rawValue.uuidString, at: 1)
-        try pathStatement.bind(record.path.volumeID.rawValue, at: 2)
-        try pathStatement.bind(record.path.relativePath.bytes, at: 3)
-        try pathStatement.bind(record.path.parentPath?.bytes, at: 4)
-        try pathStatement.bind(sqliteInteger(record.path.objectIdentity.deviceID), at: 5)
-        try pathStatement.bind(sqliteInteger(record.path.objectIdentity.inode), at: 6)
-        try pathStatement.bind(record.path.classification.rawValue, at: 7)
-        _ = try pathStatement.step()
+        try HybridInventoryWriter(database: database, generationID: generationID).write(record)
     }
 
     fileprivate func remove(path: RelativePath, generationID: InventoryGeneration.ID) throws {
         let statement = try database.prepare(
-            "DELETE FROM inventory_paths WHERE generation_id = ? AND path = ?"
+            "DELETE FROM hybrid_paths WHERE generation_id = ? AND path_id = (SELECT path_id FROM hybrid_order WHERE generation_id = ? AND path = ?)"
         )
-        try statement.bind(generationID.rawValue.uuidString, at: 1)
-        try statement.bind(path.bytes, at: 2)
+        let key = try database.hybridGenerationKey(generationID)
+        try statement.bind(key, at: 1)
+        try statement.bind(key, at: 2)
+        try statement.bind(path.bytes, at: 3)
         _ = try statement.step()
     }
 
@@ -1951,30 +1856,31 @@ extension SQLiteInventoryStore {
         // indexed instead of rescanning every path in a large generation.
         // Reuse full-scan statistics for incremental cleanup. ANALYZE may
         // count the WITHOUT ROWID table even with a bounded index sample.
-        if identities == nil { try database.execute("ANALYZE inventory_paths") }
+        if identities == nil { try database.execute("ANALYZE hybrid_paths") }
+        let key = try database.hybridGenerationKey(generationID)
         let statement = try database.prepare(
             """
-            DELETE FROM inventory_objects
+            DELETE FROM hybrid_objects
             WHERE generation_id = ?
               \(identities == nil ? "" : "AND device_id = ? AND inode = ?")
               AND NOT EXISTS (
-                  SELECT 1 FROM inventory_paths p
-                  WHERE p.generation_id = inventory_objects.generation_id
-                    AND p.device_id = inventory_objects.device_id
-                    AND p.inode = inventory_objects.inode
+                  SELECT 1 FROM hybrid_paths p
+                  WHERE p.generation_id = hybrid_objects.generation_id
+                    AND p.device_id = hybrid_objects.device_id
+                    AND p.inode = hybrid_objects.inode
               )
             """
         )
         if let identities {
             for identity in identities {
                 try statement.reset()
-                try statement.bind(generationID.rawValue.uuidString, at: 1)
+                try statement.bind(key, at: 1)
                 try statement.bind(sqliteInteger(identity.deviceID), at: 2)
                 try statement.bind(sqliteInteger(identity.inode), at: 3)
                 _ = try statement.step()
             }
         } else {
-            try statement.bind(generationID.rawValue.uuidString, at: 1)
+            try statement.bind(key, at: 1)
             _ = try statement.step()
         }
     }
@@ -3168,6 +3074,7 @@ extension SQLiteInventoryStore {
         try statement.bind(runID.rawValue.uuidString, at: 1)
         try statement.bind(descriptor.kind, at: 2)
         try statement.bind(descriptor.id, at: 3)
+        let writer = try HybridInventoryWriter(database: database, generationID: descriptor.baseGenerationID)
         while try statement.step() {
             guard let operation = statement.columnText(0),
                 let pathData = statement.columnData(2)
@@ -3180,10 +3087,7 @@ extension SQLiteInventoryStore {
                     generationID: descriptor.baseGenerationID
                 )
             } else {
-                try upsert(
-                    record: decodeInventoryRecord(from: statement, startingAt: 1),
-                    generationID: descriptor.baseGenerationID
-                )
+                try writer.write(decodeInventoryRecord(from: statement, startingAt: 1))
             }
         }
         try removeOrphanObjects(generationID: descriptor.baseGenerationID, identities: orphanCandidates)
@@ -3195,13 +3099,13 @@ extension SQLiteInventoryStore {
     ) throws {
         let statement = try database.prepare(
             """
-            DELETE FROM canonical_attributions
+            DELETE FROM hybrid_canonical
             WHERE generation_id = ? AND device_id = ? AND inode = ?
             """
         )
         for identity in identities {
             try statement.reset()
-            try statement.bind(generationID.rawValue.uuidString, at: 1)
+            try statement.bind(database.hybridGenerationKey(generationID), at: 1)
             try statement.bind(sqliteInteger(identity.deviceID), at: 2)
             try statement.bind(sqliteInteger(identity.inode), at: 3)
             _ = try statement.step()
@@ -3216,12 +3120,13 @@ extension SQLiteInventoryStore {
     ) throws {
         let insert = try database.prepare(
             """
-            INSERT INTO canonical_attributions(
-                generation_id, volume_id, device_id, inode, path, classification
+            INSERT INTO hybrid_canonical(
+                generation_id, volume_id, device_id, inode, path_id, classification
             )
-            SELECT ?, volume_id, device_id, inode, path, classification
-            FROM run_canonical_attributions
-            WHERE run_id = ? AND target_kind = ? AND target_id = ?
+            SELECT g.id,g.volume_id,c.device_id,c.inode,d.path_id,c.classification
+            FROM hybrid_generations g CROSS JOIN run_canonical_attributions c
+            CROSS JOIN hybrid_order d ON d.generation_id=g.id AND d.path=c.path
+            WHERE g.external_id=? AND c.run_id=? AND c.target_kind=? AND c.target_id=?
             """
         )
         try insert.bind(generationID.rawValue.uuidString, at: 1)
@@ -3257,9 +3162,9 @@ extension SQLiteInventoryStore {
         generationID: InventoryGeneration.ID
     ) throws {
         let statement = try database.prepare(
-            "DELETE FROM canonical_attributions WHERE generation_id = ?"
+            "DELETE FROM hybrid_canonical WHERE generation_id = ?"
         )
-        try statement.bind(generationID.rawValue.uuidString, at: 1)
+        try statement.bind(database.hybridGenerationKey(generationID), at: 1)
         _ = try statement.step()
     }
 
@@ -3269,19 +3174,20 @@ extension SQLiteInventoryStore {
         generationID: InventoryGeneration.ID
     ) throws {
         let delete = try database.prepare(
-            "DELETE FROM canonical_attributions WHERE generation_id = ?"
+            "DELETE FROM hybrid_canonical WHERE generation_id = ?"
         )
-        try delete.bind(generationID.rawValue.uuidString, at: 1)
+        try delete.bind(database.hybridGenerationKey(generationID), at: 1)
         _ = try delete.step()
 
         let insert = try database.prepare(
             """
-            INSERT INTO canonical_attributions(
-                generation_id, volume_id, device_id, inode, path, classification
+            INSERT INTO hybrid_canonical(
+                generation_id, volume_id, device_id, inode, path_id, classification
             )
-            SELECT ?, volume_id, device_id, inode, path, classification
-            FROM run_canonical_attributions
-            WHERE run_id = ? AND target_kind = ? AND target_id = ?
+            SELECT g.id,g.volume_id,c.device_id,c.inode,d.path_id,c.classification
+            FROM hybrid_generations g CROSS JOIN run_canonical_attributions c
+            CROSS JOIN hybrid_order d ON d.generation_id=g.id AND d.path=c.path
+            WHERE g.external_id=? AND c.run_id=? AND c.target_kind=? AND c.target_id=?
             """
         )
         try insert.bind(generationID.rawValue.uuidString, at: 1)
@@ -3306,12 +3212,14 @@ extension SQLiteInventoryStore {
 
     fileprivate func activate(
         generationID: InventoryGeneration.ID,
-        volumeID: MonitoredVolume.ID
+        volumeID: MonitoredVolume.ID,
+        retiredAt: Date
     ) throws {
         let retire = try database.prepare(
-            "UPDATE inventory_generations SET state = 'retired' WHERE volume_id = ? AND state = 'active'"
+            "UPDATE inventory_generations SET state = 'retired', retired_at = ? WHERE volume_id = ? AND state = 'active'"
         )
-        try retire.bind(volumeID.rawValue, at: 1)
+        try retire.bind(retiredAt.timeIntervalSince1970, at: 1)
+        try retire.bind(volumeID.rawValue, at: 2)
         _ = try retire.step()
 
         let activate = try database.prepare(
@@ -3532,21 +3440,8 @@ extension SQLiteInventoryStore {
         try staging.bind(runID.rawValue.uuidString, at: 1)
         _ = try staging.step()
 
-        let retired = try database.prepare(
-            """
-            DELETE FROM inventory_generations
-            WHERE volume_id = ? AND state = 'retired'
-              AND id NOT IN (
-                  SELECT id FROM inventory_generations
-                  WHERE volume_id = ? AND state = 'retired'
-                  ORDER BY created_at DESC, id DESC
-                  LIMIT 1
-              )
-            """
-        )
-        try retired.bind(volumeID.rawValue, at: 1)
-        try retired.bind(volumeID.rawValue, at: 2)
-        _ = try retired.step()
+        // Retired inventory is pruned only by idle maintenance after report publication.
+
     }
 
     fileprivate func loadErrors(runID: ScanRun.ID) throws -> [ScanErrorRecord] {

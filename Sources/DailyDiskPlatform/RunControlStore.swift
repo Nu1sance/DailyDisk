@@ -246,7 +246,7 @@ public actor RunControlStore: ScanProgressReporting, ScanCancellationChecking, S
     }
 
     public func enterCommitBoundary(_ snapshot: ScanProgressSnapshot) async throws {
-        guard snapshot.phase == .committing else {
+        guard snapshot.phase == .committing || snapshot.phase.isSpaceMaintenance else {
             throw RunControlStoreError.invalidProgressTransition
         }
         try withLock {
@@ -590,7 +590,7 @@ public actor RunControlStore: ScanProgressReporting, ScanCancellationChecking, S
     private func finalizePersistedSummary(_ summary: DailyDiskRunSummary) throws {
         let terminalPhase: ScanProgressPhase =
             switch summary.terminalState {
-            case .succeeded, .skippedNotDue: .completed
+            case .maintenanceCompleted, .succeeded, .skippedNotDue: .completed
             case .cancelled: .cancelled
             case .failed, .blockedByWriter: .failed
             }

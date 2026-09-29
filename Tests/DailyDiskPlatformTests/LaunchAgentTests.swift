@@ -29,14 +29,17 @@ private final class SignalProbe: ProcessSignaling, @unchecked Sendable {
 
 private actor LaunchctlProbe: ProcessRunning {
     private var responses: [ProcessResult]
+    private let beforeResult: (@Sendable () async -> Void)?
     private(set) var requests: [ProcessRequest] = []
 
-    init(responses: [ProcessResult]) {
+    init(responses: [ProcessResult], beforeResult: (@Sendable () async -> Void)? = nil) {
         self.responses = responses
+        self.beforeResult = beforeResult
     }
 
     func run(_ request: ProcessRequest) async throws -> ProcessResult {
         requests.append(request)
+        await beforeResult?()
         return responses.isEmpty
             ? ProcessResult(terminationStatus: 0, standardOutput: Data(), standardError: Data())
             : responses.removeFirst()
@@ -222,8 +225,18 @@ func stopFallbackIsRequestScoped() async throws {
             updatedAt: first.createdAt.addingTimeInterval(1)
         )
     )
+    let reachedFallback = AsyncStream<Void>.makeStream()
+    let resumeFallback = AsyncStream<Void>.makeStream()
+    defer {
+        reachedFallback.continuation.finish()
+        resumeFallback.continuation.finish()
+    }
     let probe = LaunchctlProbe(
-        responses: [launchctlResult("state = running\npid = 987\n")]
+        responses: [launchctlResult("state = running\npid = 987\n")],
+        beforeResult: {
+            reachedFallback.continuation.yield(())
+            for await _ in resumeFallback.stream { break }
+        }
     )
     let signaler = SignalProbe()
     let manager = LaunchAgentManager(
@@ -237,10 +250,12 @@ func stopFallbackIsRequestScoped() async throws {
         try await manager.requestStop(
             requestID: first.requestID,
             controlStore: control,
-            fallbackDelay: .milliseconds(100)
+            fallbackDelay: .zero
         )
     }
-    try await Task.sleep(for: .milliseconds(10))
+    // Hold the runtime-status response until turnover is complete. A sleep
+    // cannot guarantee this ordering under concurrent test/executor load.
+    for await _ in reachedFallback.stream { break }
     await control.publish(
         try ScanProgressSnapshot(
             requestID: first.requestID,
@@ -276,6 +291,7 @@ func stopFallbackIsRequestScoped() async throws {
     let second = try DailyDiskRunRequest()
     try await control.enqueue(second)
     _ = try await control.claimPendingRequest()
+    resumeFallback.continuation.yield(())
     try await stop.value
     #expect(await probe.requests.count == 1)
     #expect(signaler.processIDs.isEmpty)

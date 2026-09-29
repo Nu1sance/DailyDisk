@@ -129,3 +129,11 @@ The repository currently contains CI build/test workflows, not a notarization, r
 - [Swift: Installation on macOS](https://www.swift.org/install/macos/)
 - [Apple: Create self-signed certificates in Keychain Access](https://support.apple.com/guide/keychain-access/create-self-signed-certificates-kyca8916/mac)
 - [Apple: Code Signing Tasks](https://developer.apple.com/library/archive/documentation/Security/Conceptual/CodeSigningGuide/Procedures/Procedures.html)
+
+## Internal-beta schema 6 update
+
+Current source builds use the compact hybrid inventory and require a fresh baseline for this internal-beta transition. Explicitly remove/reset old history before replacing the application; no conversion or special compatibility UI is supplied. Keep the signing identity, bundle ID and install path unchanged, update GUI/helper together, and quit/reopen the GUI. The first full scan establishes an opening balance; growth comparisons begin with the next successful scan.
+
+### Installed transition update (2026-09-29)
+
+The user authorized deletion of old inventory and installation with a fresh baseline. The dedicated `InventoryFormatError`, `baselineResetRequired` Control category, GUI message and manual/scheduled compatibility branches have been removed. Earlier reset-prompt descriptions are historical. No conversion or old-checkpoint reuse is implemented. The migration retains only its generic empty-database consistency precondition to prevent destructive table replacement beneath an existing checkpoint.

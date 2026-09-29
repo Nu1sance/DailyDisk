@@ -27,7 +27,7 @@ struct ScanProgressView: View {
                         Button("取消检查", role: .cancel, action: onCancel)
                     }
                 }
-                if progress.phase != .cleaningUpFailedRun && !isCancelling {
+                if !progress.phase.isSpaceMaintenance && progress.phase != .cleaningUpFailedRun && !isCancelling {
                     HStack(spacing: 6) {
                         stage("读取文件", active: progress.phase.sequenceRank < 8)
                         Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.tertiary)
@@ -37,27 +37,31 @@ struct ScanProgressView: View {
                     }
                     .accessibilityElement(children: .combine)
                 }
-                HStack(alignment: .firstTextBaseline) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(
-                            progress.counters.visitedPaths > 0
-                                ? "\(progress.counters.visitedPaths.formatted()) 个文件与目录"
-                                : "\(progress.counters.processedEvents.formatted()) 条变化记录"
-                        )
-                        .font(.system(size: 24, weight: .medium, design: .rounded)).monospacedDigit()
-                        Text(progress.counters.visitedPaths > 0 ? "已检查" : "已读取")
-                            .font(.caption).foregroundStyle(.secondary)
+                if !progress.phase.isSpaceMaintenance {
+                    HStack(alignment: .firstTextBaseline) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(
+                                progress.counters.visitedPaths > 0
+                                    ? "\(progress.counters.visitedPaths.formatted()) 个文件与目录"
+                                    : "\(progress.counters.processedEvents.formatted()) 条变化记录"
+                            )
+                            .font(.system(size: 24, weight: .medium, design: .rounded)).monospacedDigit()
+                            Text(progress.counters.visitedPaths > 0 ? "已检查" : "已读取")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        TimelineView(.periodic(from: .now, by: 1)) { context in
+                            VStack(alignment: .trailing, spacing: 4) {
+                                Text("已用时 \(elapsed(progress.startedAt, context.date))").monospacedDigit()
+                                Text(waitingStatus ?? updateLabel(progress.updatedAt, context.date))
+                                    .foregroundStyle(
+                                        waitingStatus == nil && context.date.timeIntervalSince(progress.updatedAt) > 15
+                                            ? .orange : .secondary)
+                            }.font(.caption)
+                        }
                     }
-                    Spacer()
-                    TimelineView(.periodic(from: .now, by: 1)) { context in
-                        VStack(alignment: .trailing, spacing: 4) {
-                            Text("已用时 \(elapsed(progress.startedAt, context.date))").monospacedDigit()
-                            Text(waitingStatus ?? updateLabel(progress.updatedAt, context.date))
-                                .foregroundStyle(
-                                    waitingStatus == nil && context.date.timeIntervalSince(progress.updatedAt) > 15
-                                        ? .orange : .secondary)
-                        }.font(.caption)
-                    }
+                } else {
+                    Text(progress.startedAt, style: .timer).monospacedDigit()
                 }
                 if progress.phase == .preservingOpaqueInventory {
                     Text(
@@ -65,7 +69,10 @@ struct ScanProgressView: View {
                     )
                     .font(.callout).monospacedDigit()
                 }
-                if progress.phase == .cleaningUpFailedRun {
+                if progress.phase.isSpaceMaintenance {
+                    Text("正在维护数据，请等待完成。此阶段不可取消，可以关闭窗口。")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else if progress.phase == .cleaningUpFailedRun {
                     Text("可以关闭窗口，后台会安全结束本次检查。")
                         .font(.caption).foregroundStyle(.secondary)
                 } else if !progress.phase.allowsCancellation && !isCancelling {
@@ -75,15 +82,17 @@ struct ScanProgressView: View {
                     Text("可以关闭窗口，检查会在后台继续。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                DisclosureGroup("检查详情", isExpanded: $showsDetails) {
-                    Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 8) {
-                        counter("读取的变化记录", progress.counters.processedEvents)
-                        counter("检查的文件与目录", progress.counters.visitedPaths)
-                        counter("已索引对象", progress.counters.indexedObjects)
-                        counter("无法读取", progress.counters.unreadablePaths)
-                        counter("检查期间发生变化", progress.counters.transientErrors)
-                    }.font(.caption).padding(.top, 10)
-                }.font(.caption).foregroundStyle(.secondary)
+                if !progress.phase.isSpaceMaintenance {
+                    DisclosureGroup("检查详情", isExpanded: $showsDetails) {
+                        Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 8) {
+                            counter("读取的变化记录", progress.counters.processedEvents)
+                            counter("检查的文件与目录", progress.counters.visitedPaths)
+                            counter("已索引对象", progress.counters.indexedObjects)
+                            counter("无法读取", progress.counters.unreadablePaths)
+                            counter("检查期间发生变化", progress.counters.transientErrors)
+                        }.font(.caption).padding(.top, 10)
+                    }.font(.caption).foregroundStyle(.secondary)
+                }
             }
             .padding(24)
             .background(.blue.opacity(0.055), in: RoundedRectangle(cornerRadius: 16))
@@ -136,6 +145,9 @@ struct ScanProgressView: View {
 extension ScanProgressPhase {
     var userTitle: String {
         switch self {
+        case .cleaningRetiredInventory: "正在清理过期基线"
+        case .reclaimingSpace: "正在回收数据库空间"
+        case .verifyingMaintenance: "正在验证维护结果"
         case .queued, .waitingForWriter: "等待后台开始检查"
         case .preparing, .discoveringStorage: "正在准备检查"
         case .recoveringInterruptedRun: "正在恢复上次检查"
@@ -156,6 +168,9 @@ extension ScanProgressPhase {
 
     var userDetail: String {
         switch self {
+        case .cleaningRetiredInventory: "移除已超过恢复窗口的旧库存，历史报告和当前基线会保留。"
+        case .reclaimingSpace: "正在整理数据库并释放空闲空间，较大的数据库可能需要几分钟。"
+        case .verifyingMaintenance: "正在检查数据库、当前基线和报告是否完整。"
         case .queued, .waitingForWriter: "请求已收到，正在等待后台任务就绪。"
         case .preparing, .discoveringStorage: "正在识别内置磁盘并读取已有记录。"
         case .recoveringInterruptedRun: "正在清理上次未完成的检查。文件较多时可能需要几分钟，已保存的记录会保留。"

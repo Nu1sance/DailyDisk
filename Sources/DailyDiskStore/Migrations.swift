@@ -1,12 +1,14 @@
 import Foundation
 
 public enum DailyDiskSchema {
-    public static let currentVersion = 4
+    public static let currentVersion = 6
     public static let expectedMigrations: [(version: Int, name: String)] = [
         (1, "initial"),
         (2, "one_full_volume_per_domain"),
         (3, "inventory_path_cascade_index"),
         (4, "generation_cleanup"),
+        (5, "space_maintenance"),
+        (6, "hybrid_inventory"),
     ]
 }
 
@@ -30,9 +32,13 @@ enum DatabaseMigrator {
             resourceName: "003_inventory_path_cascade_index"
         ),
         Migration(version: 4, name: "generation_cleanup", resourceName: "004_generation_cleanup"),
+        Migration(version: 5, name: "space_maintenance", resourceName: "005_space_maintenance"),
+        Migration(version: 6, name: "hybrid_inventory", resourceName: "006_hybrid_inventory"),
     ]
 
-    static func migrate(_ database: SQLiteDatabase, now: Date = Date()) throws {
+    static func migrate(
+        _ database: SQLiteDatabase, now: Date = Date(), targetVersion: Int = DailyDiskSchema.currentVersion
+    ) throws {
         let userVersion = Int(try database.scalarInt64("PRAGMA user_version") ?? 0)
         let hasMetadata =
             try database.scalarInt64(
@@ -54,6 +60,17 @@ enum DatabaseMigrator {
             )
         }
         try validateContinuity(applied)
+        if targetVersion >= 6, metadataVersion > 0, metadataVersion < 6 {
+            let occupied =
+                try database.scalarInt64(
+                    """
+                    SELECT EXISTS(SELECT 1 FROM scan_runs) OR EXISTS(SELECT 1 FROM inventory_generations)
+                      OR EXISTS(SELECT 1 FROM inventory_objects) OR EXISTS(SELECT 1 FROM checkpoints)
+                    """) ?? 1
+            guard occupied == 0 else {
+                throw migrationError("Destructive inventory schema replacement requires an empty database")
+            }
+        }
 
         if !hasMetadata {
             guard userVersion == 0 else {
@@ -70,10 +87,17 @@ enum DatabaseMigrator {
             )
         }
 
-        for migration in migrations where migration.version > metadataVersion {
+        for migration in migrations where migration.version > metadataVersion && migration.version <= targetVersion {
             let sql = try loadMigration(named: migration.resourceName)
             try database.transaction {
                 try database.execute(sql)
+                if migration.version == 5 {
+                    let retirement = try database.prepare(
+                        "UPDATE inventory_generations SET retired_at = ? WHERE state = 'retired'"
+                    )
+                    try retirement.bind(now.timeIntervalSince1970, at: 1)
+                    _ = try retirement.step()
+                }
                 let statement = try database.prepare(
                     "INSERT INTO schema_metadata(version, name, applied_at) VALUES (?, ?, ?)"
                 )

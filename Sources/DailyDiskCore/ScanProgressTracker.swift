@@ -161,7 +161,7 @@ public actor ScanProgressTracker: ScanProgressTracking {
             mode = nextMode
         }
         let snapshot = try makeSnapshot(phase: nextPhase, at: Date())
-        if nextPhase == .committing, let commitBoundary {
+        if nextPhase == .committing || nextPhase.isSpaceMaintenance, let commitBoundary {
             try await commitBoundary.enterCommitBoundary(snapshot)
         } else {
             await reporter.publish(snapshot)

@@ -99,6 +99,10 @@ public struct DailyDiskScheduledRunner: Sendable {
                     let managedRoot = SQLiteInventoryStore.defaultDatabaseURL
                         .deletingLastPathComponent()
                     _ = try RetentionPolicy.default.prune(managedRoot: managedRoot)
+                    try await store.pruneRetiredGenerations()
+                },
+                spaceMaintenance: { tracker in
+                    try await store.maintainSpace(observer: tracker)
                 },
                 errorHandler: { event, error in
                     try? await logger?.log(
@@ -114,7 +118,7 @@ public struct DailyDiskScheduledRunner: Sendable {
             )
             try await control.complete(summary)
             switch summary.terminalState {
-            case .succeeded, .skippedNotDue:
+            case .maintenanceCompleted, .succeeded, .skippedNotDue:
                 return 0
             case .cancelled, .failed, .blockedByWriter:
                 return 1

@@ -366,3 +366,44 @@ func appControllerDiscoversScheduledRun() async throws {
     await controller.cancelScan()
     #expect(try await control.cancellationRequest()?.requestID == scheduled.requestID)
 }
+
+@Test("Space maintenance enqueues the distinct action and reconnects to non-cancellable progress")
+@MainActor
+func appSpaceMaintenanceReconnect() async throws {
+    let root = appControlRoot()
+    defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent()) }
+    let control = try RunControlStore(rootURL: root)
+    let url = root.deletingLastPathComponent().appendingPathComponent("missing.sqlite")
+    let controller = makeController(control: control, databaseURL: url)
+    await controller.reclaimSpace()
+    let pending = try #require(try await control.pendingRequest())
+    #expect(pending.action == .reclaimSpace)
+    let claimed = try #require(try await control.claimPendingRequest())
+    let tracker = try ScanProgressTracker(
+        context: ScanProgressContext(requestID: claimed.requestID, trigger: .manual, startedAt: claimed.createdAt),
+        reporter: control, cancellationChecker: control, commitBoundary: control)
+    try await tracker.transition(to: .preparing, mode: nil)
+    try await tracker.transition(to: .reclaimingSpace, mode: nil)
+    let restarted = makeController(control: control, databaseURL: url)
+    await restarted.refreshScanState()
+    guard case .finishing(let progress) = restarted.scanState else {
+        Issue.record("Expected non-cancellable maintenance after reconnect")
+        return
+    }
+    #expect(progress.phase == .reclaimingSpace)
+    await restarted.cancelScan()
+    #expect(try await control.cancellationRequest() == nil)
+    try await tracker.transition(to: .verifyingMaintenance, mode: nil)
+    try await control.complete(
+        DailyDiskRunSummary(
+            requestID: claimed.requestID, trigger: .manual, terminalState: .maintenanceCompleted,
+            startedAt: claimed.createdAt, finishedAt: Date(), completedDomainCount: 0,
+            failedDomainCount: 0, reportRunIDs: []))
+    await restarted.refreshScanState()
+    guard case .succeeded(let summary) = restarted.scanState else {
+        Issue.record("Expected maintenance completion without an inventory report")
+        return
+    }
+    #expect(summary.terminalState == .maintenanceCompleted)
+    #expect(summary.completedDomainCount == 0)
+}

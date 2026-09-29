@@ -73,6 +73,7 @@ public struct DailyDiskRunCoordinator: Sendable {
     private let progressFactory: ProgressFactory
     private let scheduledReportHandler: ReportHandler?
     private let retentionHandler: RetentionHandler?
+    private let spaceMaintenance: (@Sendable (any ScanProgressTracking) async throws -> Void)?
     private let errorHandler: ErrorHandler?
 
     public init(
@@ -93,6 +94,7 @@ public struct DailyDiskRunCoordinator: Sendable {
         },
         scheduledReportHandler: ReportHandler? = nil,
         retentionHandler: RetentionHandler? = nil,
+        spaceMaintenance: (@Sendable (any ScanProgressTracking) async throws -> Void)? = nil,
         errorHandler: ErrorHandler? = nil
     ) {
         self.store = store
@@ -110,6 +112,7 @@ public struct DailyDiskRunCoordinator: Sendable {
         self.progressFactory = progressFactory
         self.scheduledReportHandler = scheduledReportHandler
         self.retentionHandler = retentionHandler
+        self.spaceMaintenance = spaceMaintenance
         self.errorHandler = errorHandler
     }
 
@@ -150,6 +153,12 @@ public struct DailyDiskRunCoordinator: Sendable {
                 try await tracker.transition(to: .preparing, mode: nil)
             }
             if !resumingPublication || recoveringCommit {
+                if let spaceMaintenance {
+                    if try await tracker.currentSnapshot().phase != .preparing {
+                        try await tracker.transition(to: .preparing, mode: nil)
+                    }
+                    try await spaceMaintenance(tracker)
+                }
                 try await tracker.transition(to: .discoveringStorage, mode: nil)
             }
             let topology = try await discovery.discoverInternalAPFSVolumes()
@@ -272,7 +281,10 @@ public struct DailyDiskRunCoordinator: Sendable {
                 completedDomainCount: 0,
                 failedDomainCount: isScanCancellation(error) ? 0 : 1,
                 reportRunIDs: [],
-                errorCategory: isScanCancellation(error) ? nil : error is WriterLeaseError ? .writerBusy : .unknown
+                errorCategory: isScanCancellation(error)
+                    ? nil
+                    : error is WriterLeaseError
+                        ? .writerBusy : .unknown
             )
         }
     }

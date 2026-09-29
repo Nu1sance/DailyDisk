@@ -25,6 +25,26 @@ private struct FixedEventStoreUUIDProvider: EventStoreUUIDIdentifying {
     }
 }
 
+private final class EventStoreProbe: EventStoreUUIDIdentifying, @unchecked Sendable {
+    private let provider = SystemEventStoreUUIDProvider()
+    private let lock = NSLock()
+    private var observations: [String] = []
+
+    var diagnostic: String { lock.withLock { observations.joined(separator: "; ") } }
+
+    func eventStoreUUID(deviceID: UInt64) -> UUID? {
+        let value = provider.eventStoreUUID(deviceID: deviceID)
+        lock.withLock { observations.append("journalAvailable=\(value != nil)") }
+        return value
+    }
+
+    func latestEventID(deviceID: UInt64) -> UInt64? {
+        let value = provider.latestEventID(deviceID: deviceID)
+        lock.withLock { observations.append("deviceCursor=\(value.map(String.init) ?? "nil")") }
+        return value
+    }
+}
+
 @Test("Unsupported volumes return an explicit untrusted fence")
 func unsupportedVolumeFence() async throws {
     let volume = MonitoredVolume(
@@ -121,12 +141,20 @@ func quietSinceNowCursor() async throws {
     let volume = try #require(
         topology.volumes.first { $0.role == .data && $0.supportsPersistentEvents }
     )
-    let session = try await FSEventHistoryReader().openSession(volume: volume, checkpoint: nil)
-    _ = try await session.replayHistoricalEvents(consume: { _ in })
+    let probe = EventStoreProbe()
+    let session = try await FSEventHistoryReader(eventStoreUUIDProvider: probe)
+        .openSession(volume: volume, checkpoint: nil)
+    let history = try await session.replayHistoricalEvents(consume: { _ in })
     let fence = try await session.flushLiveEvents(consume: { _ in })
+    let diagnostic =
+        "history=\(history.diagnostic ?? "none"); flush=\(fence.diagnostic ?? "none"); \(probe.diagnostic)"
 
-    #expect(fence.trust == .trusted)
-    #expect(fence.highestFullyDeliveredEventID != nil)
+    #expect(history.trust == .trusted, "Quiet history diagnostic: \(diagnostic)")
+    #expect(fence.trust == .trusted, "Quiet flush diagnostic: \(diagnostic)")
+    #expect(
+        fence.highestFullyDeliveredEventID != nil,
+        "Quiet flush diagnostic: \(diagnostic)"
+    )
 }
 
 @Test("Real FSEvents session flushes live events and replays events after restart")

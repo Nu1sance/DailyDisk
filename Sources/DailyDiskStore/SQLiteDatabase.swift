@@ -287,7 +287,7 @@ final class SQLiteDatabase {
         }
     }
 
-    private func checkpointWAL() throws {
+    func checkpointWAL() throws {
         let statement = try prepare("PRAGMA wal_checkpoint(TRUNCATE)")
         guard try statement.step() else {
             throw SQLiteStoreError(code: -2, message: "WAL checkpoint returned no status")

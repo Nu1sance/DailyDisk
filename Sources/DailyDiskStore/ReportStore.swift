@@ -294,7 +294,7 @@ public actor SQLiteReportStore {
             )
         }
 
-        let invariants = Int(
+        var invariants = Int(
             try database.scalarInt64(
                 """
                 SELECT
@@ -307,6 +307,7 @@ public actor SQLiteReportStore {
                 """
             ) ?? 0
         )
+        if schemaVersion >= 6 { invariants += try database.verifyHybridOrdering() }
         let running = Int(
             try database.scalarInt64("SELECT COUNT(*) FROM scan_runs WHERE status = 'running'") ?? 0
         )
@@ -320,6 +321,10 @@ public actor SQLiteReportStore {
             reportPayloadViolationCount: try reportPayloadViolationCount(),
             writerIsActive: writerIsActive
         )
+    }
+
+    public func spaceUsage() throws -> DatabaseSpaceUsage {
+        try database.spaceUsage()
     }
 
     public func diagnostics() async throws -> DatabaseDiagnostics {

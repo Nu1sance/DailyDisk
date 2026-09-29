@@ -2,6 +2,10 @@
 
 DailyDisk is a GUI-first, source-built macOS disk-growth monitor. Click **立即检查** to start a background scan, follow phase/count progress, close and reopen the window without stopping work, browse history and diagnostics, or keep the automatic daily run. DailyDisk compares the current internal APFS inventory with its previous state, attributes file growth, records signed reconciliation corrections, and keeps physical APFS differences separate when they cannot safely be assigned to a path.
 
+## Internal-beta storage transition
+
+Current source builds create schema 6: compact integer inventory keys, immutable parent/name nodes and a generation-local raw-path ordering index. This internal-beta transition uses a fresh database, with no old-inventory conversion or compatibility UI. Remove/reset old history before switching; an empty new inventory must never inherit an old checkpoint. The first new scan establishes an opening balance, and growth comparisons begin with the next successful scan.
+
 ## What it monitors
 
 - The internal APFS container and its System/Data/VM/Preboot/Recovery/Update roles
@@ -189,3 +193,10 @@ DailyDisk is available under the [MIT License](LICENSE).
 Overview and report details keep their source lists and add a ring chart for up to five non-overlapping positive entries from the stored ranking. Ancestors and duplicate paths are excluded before calculating percentages. The denominator is only the displayed subset, not all file growth or the physical disk delta. Negative file changes and unattributed APFS space do not become pie slices. The overview separately explains `physical delta = net file delta + unattributed delta + DailyDisk overhead`. Fixed system-directory descriptions (for example diagnostics logs below `private/var/db/diagnostics`) appear only after session path disclosure; hidden paths remain hidden in the chart and legend.
 
 全量检查完成文件遍历后，如有无法读取的目录，会显示“正在保留无法读取目录的历史记录”，并展示处理数量；这一步可取消，之前的报告和基线会保留。事件日志身份改变时会自动进行全量恢复，因此并非每次例行检查都能使用增量扫描。
+
+
+### 回收 DailyDisk 自身占用
+
+在 **设置 → 诊断 → 数据占用** 查看当前占用、数据库可复用空间和上次维护结果，选择 **回收数据库空间** 让后台 helper 整理数据库。当前基线和历史报告会保留；需要每日任务已安装并获批准，也需要足够的临时空间。维护开始后不可取消，可以关闭窗口等待完成。
+
+旧库存有 24 小时恢复窗口，后续后台运行时清理。自动压缩有空间阈值和七天冷却期，不会每天无条件执行。全量扫描仍需要临时空间；详情见 [运行维护](Docs/Operations.md#reclaiming-dailydisk-data-space)。升级后请重新打开 GUI，使其与 helper 使用同一版本。

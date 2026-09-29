@@ -122,10 +122,10 @@ public struct DailyDiskAgentRunner: Sendable {
             let summary = try? DailyDiskRunSummary(
                 requestID: request.requestID,
                 trigger: progress.trigger,
-                terminalState: .succeeded,
+                terminalState: request.action == .reclaimSpace ? .maintenanceCompleted : .succeeded,
                 startedAt: progress.startedAt,
                 finishedAt: max(progress.updatedAt, Date()),
-                completedDomainCount: 1,
+                completedDomainCount: request.action == .reclaimSpace ? 0 : 1,
                 failedDomainCount: 0,
                 reportRunIDs: []
             )
@@ -165,6 +165,10 @@ public struct DailyDiskAgentRunner: Sendable {
         ownership: ManualRequestOwnership,
         controlStore: RunControlStore
     ) async -> Int32 {
+        if request.action == .reclaimSpace {
+            return await SpaceMaintenanceRunner().run(
+                request: request, resumedProgress: resumedProgress, control: controlStore)
+        }
         let startedAt = resumedProgress?.startedAt ?? Date()
         let resumedRunID =
             resumedProgress == nil
@@ -225,6 +229,10 @@ public struct DailyDiskAgentRunner: Sendable {
                     let managedRoot = SQLiteInventoryStore.defaultDatabaseURL
                         .deletingLastPathComponent()
                     _ = try RetentionPolicy.default.prune(managedRoot: managedRoot)
+                    try await store.pruneRetiredGenerations()
+                },
+                spaceMaintenance: { tracker in
+                    try await store.maintainSpace(observer: tracker)
                 }
             )
             let summary = await coordinator.run(
@@ -241,7 +249,7 @@ public struct DailyDiskAgentRunner: Sendable {
             )
             try await controlStore.complete(summary)
             switch summary.terminalState {
-            case .succeeded, .cancelled:
+            case .maintenanceCompleted, .succeeded, .cancelled:
                 return 0
             case .failed, .skippedNotDue, .blockedByWriter:
                 return 1
