@@ -92,6 +92,7 @@ public actor LaunchAgentManager {
     private let processSignaler: any ProcessSignaling
     private let userID: uid_t
     private let label: String
+    private var registrationRevision: UInt64 = 0
 
     public init(
         plistName: String = LaunchAgentManager.plistName,
@@ -131,12 +132,25 @@ public actor LaunchAgentManager {
         guard Self.isStableInstallationPath(bundleURL) else {
             throw LaunchAgentManagerError.unstableApplicationPath(bundleURL.path)
         }
+        registrationRevision &+= 1
         try service.register()
     }
 
-    public func unregister() throws { try service.unregister() }
+    public func unregister() throws {
+        registrationRevision &+= 1
+        try service.unregister()
+    }
 
     public func runtimeStatus() async throws -> LaunchAgentRuntimeStatus {
+        try await loadedRuntimeStatus()
+            ?? LaunchAgentRuntimeStatus(
+                isRunning: false, processID: nil, lastExitCode: nil, state: nil
+            )
+    }
+
+    // A missing job is different from a loaded, idle job. SMAppService may
+    // retain enabled registration metadata after the app has been replaced.
+    private func loadedRuntimeStatus() async throws -> LaunchAgentRuntimeStatus? {
         let result = try await processRunner.run(
             ProcessRequest(
                 executableURL: URL(fileURLWithPath: "/bin/launchctl"),
@@ -152,12 +166,7 @@ public actor LaunchAgentManager {
             else {
                 throw LaunchAgentManagerError.runtimeStatusUnavailable
             }
-            return LaunchAgentRuntimeStatus(
-                isRunning: false,
-                processID: nil,
-                lastExitCode: nil,
-                state: nil
-            )
+            return nil
         }
         return Self.parseRuntimeStatus(String(decoding: result.standardOutput, as: UTF8.self))
     }
@@ -169,7 +178,28 @@ public actor LaunchAgentManager {
         guard registrationStatus == .enabled else {
             throw LaunchAgentManagerError.serviceUnavailable(registrationStatus)
         }
-        var current = try await runtimeStatus()
+        let observedRevision = registrationRevision
+        var loaded = try await loadedRuntimeStatus()
+        if loaded == nil {
+            // Another actor call may have repaired or changed registration while
+            // print was suspended. Its missing result is then stale: re-inspect,
+            // never unregister the helper that the other call just started.
+            if observedRevision == registrationRevision {
+                guard Self.isStableInstallationPath(bundleURL) else {
+                    throw LaunchAgentManagerError.unstableApplicationPath(bundleURL.path)
+                }
+                try unregister()
+                try register()
+            }
+            let repairedStatus = service.status()
+            guard repairedStatus == .enabled else {
+                throw LaunchAgentManagerError.serviceUnavailable(repairedStatus)
+            }
+            loaded = try await loadedRuntimeStatus()
+        }
+        guard var current = loaded else {
+            throw LaunchAgentManagerError.runtimeStatusUnavailable
+        }
         if current.isRunning, let currentProcessID = current.processID,
             let controlStore,
             try await controlStore.pendingRequest() != nil,
