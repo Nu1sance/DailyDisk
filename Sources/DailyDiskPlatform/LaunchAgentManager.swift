@@ -92,6 +92,7 @@ public actor LaunchAgentManager {
     private let processSignaler: any ProcessSignaling
     private let userID: uid_t
     private let label: String
+    private var registrationRevision: UInt64 = 0
 
     public init(
         plistName: String = LaunchAgentManager.plistName,
@@ -131,10 +132,14 @@ public actor LaunchAgentManager {
         guard Self.isStableInstallationPath(bundleURL) else {
             throw LaunchAgentManagerError.unstableApplicationPath(bundleURL.path)
         }
+        registrationRevision &+= 1
         try service.register()
     }
 
-    public func unregister() throws { try service.unregister() }
+    public func unregister() throws {
+        registrationRevision &+= 1
+        try service.unregister()
+    }
 
     public func runtimeStatus() async throws -> LaunchAgentRuntimeStatus {
         try await loadedRuntimeStatus()
@@ -173,15 +178,19 @@ public actor LaunchAgentManager {
         guard registrationStatus == .enabled else {
             throw LaunchAgentManagerError.serviceUnavailable(registrationStatus)
         }
+        let observedRevision = registrationRevision
         var loaded = try await loadedRuntimeStatus()
         if loaded == nil {
-            // Repair this proven registration/runtime mismatch once per start.
-            // Never unregister a merely idle or running job, or loop on failure.
-            guard Self.isStableInstallationPath(bundleURL) else {
-                throw LaunchAgentManagerError.unstableApplicationPath(bundleURL.path)
+            // Another actor call may have repaired or changed registration while
+            // print was suspended. Its missing result is then stale: re-inspect,
+            // never unregister the helper that the other call just started.
+            if observedRevision == registrationRevision {
+                guard Self.isStableInstallationPath(bundleURL) else {
+                    throw LaunchAgentManagerError.unstableApplicationPath(bundleURL.path)
+                }
+                try unregister()
+                try register()
             }
-            try service.unregister()
-            try register()
             let repairedStatus = service.status()
             guard repairedStatus == .enabled else {
                 throw LaunchAgentManagerError.serviceUnavailable(repairedStatus)

@@ -487,3 +487,54 @@ func reinstallRegistrationFailure(unregisterFails: Bool) async throws {
     #expect(service.registerCount == (unregisterFails ? 0 : 1))
     #expect(await probe.requests.count == 1)
 }
+
+private actor ConcurrentMissingJobProbe: ProcessRunning {
+    private var firstWaiter: CheckedContinuation<Void, Never>?
+    private var inspections = 0
+    let loadedAfterRepair: Bool
+    init(loadedAfterRepair: Bool = true) { self.loadedAfterRepair = loadedAfterRepair }
+    func run(_ request: ProcessRequest) async throws -> ProcessResult {
+        if request.arguments.first == "print" {
+            inspections += 1
+            if inspections == 1 {
+                await withCheckedContinuation { firstWaiter = $0 }
+                return missingLaunchAgent()
+            }
+            if inspections == 2 {
+                firstWaiter?.resume()
+                firstWaiter = nil
+                return missingLaunchAgent()
+            }
+            return loadedAfterRepair ? launchctlResult("state = running\npid = 42\n") : missingLaunchAgent()
+        }
+        return launchctlResult()
+    }
+}
+
+@Test("Simultaneous starts must not unregister the freshly repaired job twice")
+func concurrentReinstallRepair() async throws {
+    let service = FakeRegistrationService(status: .enabled)
+    let manager = LaunchAgentManager(
+        service: service, bundleURL: URL(fileURLWithPath: "/Applications/DailyDisk.app"),
+        processRunner: ConcurrentMissingJobProbe(), userID: 501)
+    async let first = manager.startIfNeeded()
+    async let second = manager.startIfNeeded()
+    _ = try await (first, second)
+    #expect(service.unregisterCount == 1)
+    #expect(service.registerCount == 1)
+}
+
+@Test("Concurrent repair failure cannot trigger a second unregister", arguments: [false, true])
+func concurrentReinstallFailure(registerFails: Bool) async {
+    let service = FakeRegistrationService(status: .enabled)
+    if registerFails { service.registrationError = .serviceUnavailable(.unknown) }
+    let manager = LaunchAgentManager(
+        service: service, bundleURL: URL(fileURLWithPath: "/Applications/DailyDisk.app"),
+        processRunner: ConcurrentMissingJobProbe(loadedAfterRepair: false), userID: 501)
+    async let first = try? manager.startIfNeeded()
+    async let second = try? manager.startIfNeeded()
+    let results = await (first, second)
+    #expect(results.0 == nil && results.1 == nil)
+    #expect(service.unregisterCount == 1)
+    #expect(service.registerCount == 1)
+}
