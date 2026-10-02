@@ -13,7 +13,7 @@
 <sub>A daily, privacy-first disk-growth ledger for macOS: which files grew, by how much, and what can't be explained.</sub>
 
 <p>
-  <a href="https://github.com/Nu1sance/DailyDisk/actions/workflows/ci.yml"><img src="https://img.shields.io/badge/CI-GitHub%20Actions-2088FF?logo=githubactions&logoColor=white" alt="CI"></a>
+  <a href="https://github.com/Nu1sance/DailyDisk/actions/workflows/ci.yml"><img src="https://github.com/Nu1sance/DailyDisk/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/macOS-15%2B-111?logo=apple&logoColor=white" alt="macOS 15+">
   <img src="https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white" alt="Swift 6">
   <img src="https://img.shields.io/badge/APFS-internal%20startup%20disk-3b55d0" alt="APFS">
@@ -24,7 +24,6 @@
 <p>
   <a href="https://dailydisk.app"><b>🌐 官网</b></a> ·
   <a href="Docs/assets/dailydisk-film.mp4"><b>🎬 宣传片</b></a> ·
-  <a href="#-监控什么"><b>📡 监控什么</b></a> ·
   <a href="#-快速开始"><b>🚀 快速开始</b></a> ·
   <a href="#-工作原理"><b>🧠 工作原理</b></a> ·
   <a href="#-文档"><b>📚 文档</b></a>
@@ -93,51 +92,6 @@
 ### 🧹 自身占用可回收
 紧凑库存结构（schema 8 / W6）每天只写入有变化的记录。数据库可在 **设置 → 诊断** 中一键回收空间，不影响基线和历史报告。
 
-</td>
-</tr>
-</table>
-
-## 📡 监控什么
-
-<table>
-<tr>
-<td width="50%" valign="top">
-<img src="Docs/assets/monitors/01-files.jpg" alt="">
-<p><sub><code>FILES</code></sub><br><b>文件的来去</b><br>新增、删除、移动、硬链接和尺寸变化，都会逐一记账。</p>
-</td>
-<td width="50%" valign="top">
-<img src="Docs/assets/monitors/02-fsevents.jpg" alt="">
-<p><sub><code>FSEVENTS</code></sub><br><b>持久变化日志</b><br>读取系统 FSEvents 持久日志中的历史变化，只处理变动过的部分。</p>
-</td>
-</tr>
-<tr>
-<td valign="top">
-<img src="Docs/assets/monitors/03-apfs-roles.jpg" alt="">
-<p><sub><code>APFS CONTAINER</code></sub><br><b>容器与卷角色</b><br>System、Data、VM、Preboot、Recovery、Update 六种角色都有卷级指标。</p>
-</td>
-<td valign="top">
-<img src="Docs/assets/monitors/04-reconciliation.jpg" alt="">
-<p><sub><code>RECONCILIATION</code></sub><br><b>每日完整对账</b><br>每天 05:00 做一次完整清点，与上一份库存逐项比对，并对累积误差记录带符号的校正。</p>
-</td>
-</tr>
-<tr>
-<td valign="top">
-<img src="Docs/assets/monitors/05-held-open.jpg" alt="">
-<p><sub><code>HELD OPEN</code></sub><br><b>删了却还占着的文件</b><br>已删除但仍被进程打开的文件，一样能看到。</p>
-</td>
-<td valign="top">
-<img src="Docs/assets/monitors/06-snapshots.jpg" alt="">
-<p><sub><code>SNAPSHOTS</code></sub><br><b>快照与容器容量</b><br>记录 APFS 快照的成员关系和整个容器的容量变化。</p>
-</td>
-</tr>
-<tr>
-<td valign="top">
-<img src="Docs/assets/monitors/07-inventory-root.jpg" alt="">
-<p><sub><code>INVENTORY ROOT</code></sub><br><b>唯一的完整清点范围</b><br><code>/System/Volumes/Data</code> 是启动盘上唯一被完整清点的范围；外置、网络和磁盘映像卷默认排除。</p>
-</td>
-<td valign="top">
-<img src="Docs/assets/monitors/08-overhead.jpg" alt="">
-<p><sub><code>OVERHEAD</code></sub><br><b>自身的开销</b><br>DailyDisk 的数据库、报告和日志占用多少空间，也单独记账。</p>
 </td>
 </tr>
 </table>
@@ -391,5 +345,5 @@ Config/  Scripts/  Docs/
 DailyDisk 采用 [MIT License](LICENSE) 发布。
 
 <div align="center">
-<sub>为想知道“空间都去哪儿了”的 Mac 用户而做 · <a href="Docs/assets/dailydisk-film.mp4">🎬 宣传片</a> · <a href="https://dailydisk.app">dailydisk.app</a>（即将上线）</sub>
+<sub>为想知道“空间都去哪儿了”的 Mac 用户而做 · <a href="https://dailydisk.app">dailydisk.app</a>（即将上线）</sub>
 </div>
