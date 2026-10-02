@@ -125,7 +125,7 @@ W1 计量需区分 CACHE_WRITE（WAL 模式下的 WAL 页写）、CACHE_SPILL（
 
 ## W6 分支落地与测量（2026-10-02）
 
-主线 `92509b6` 已推送；`feature/w6-delta-inventory` 只保留在本地。W6 已接入生产 `SQLiteInventoryStore` 和 daily-full coordinator，不再仅是独立实验。Migration 008 保留 schema 7 数据，新增变化前旧值及版本链；首次基线/legacy recovery 仍可建立完整 generation。没有替换已安装应用、重置库存或触发真实扫描。
+此阶段主线为 `92509b6`，W6 在本地 `feature/w6-delta-inventory` 上开发；后续已完成安装验收并纳入主线。W6 已接入生产 `SQLiteInventoryStore` 和 daily-full coordinator，不再仅是独立实验。Migration 008 保留 schema 7 数据，新增变化前旧值及版本链；首次基线/legacy recovery 仍可建立完整 generation。没有替换已安装应用、重置库存或触发真实扫描。
 
 已落地：1,024 条扫描批次、256 路径预取、精确分段 seen 位图、opaque 继承、删除分页、E0–E1 overlay、候选 canonical、原子差异/旧值/checkpoint 提交、24 小时已发布版本前缀回收。对象元数据与路径独立持久化：只有大小/时间变化时不写路径、排序或当前 canonical。正常增量提交也保留旧值，避免破坏已有恢复链。短期版本是逻辑基线，不复制整代，也不提供 GUI 历史回滚。
 
