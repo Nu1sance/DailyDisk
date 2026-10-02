@@ -483,3 +483,59 @@ Installed acceptance update (2026-10-01): Computer Use access is now working. Re
 
 
 2026-10-02 主线发布准备：W6 提升为主要低写入架构，详见 Docs/WriteOptimizationReview.md。新增相同对象/排序映射 no-op UPDATE 防护，membership 返回值、opaque 计数、seal 失效和冲突检测不变。默认并发 276 项通过（7.001 秒，4 个 opt-in 未启用）；格式、构建、LaunchAgent lint、diff 检查及两个开发诊断脚本的 5 项测试通过。此前已验收的 schema 7/05:00/探针改动一并提交；不把小改动宣称为 W6 完成，不更新本机安装或触发扫描。
+
+
+## W6 production adapter validation (2026-10-02, local branch)
+
+Main `92509b6` was pushed before creating `feature/w6-delta-inventory`. This section covers local schema-8 source, not installed acceptance. All fixtures are synthetic. `W6InventoryPrototype` lives under Store tests as an independent experiment; production uses `SQLiteInventoryStore`.
+
+Coverage added:
+
+- Triggers reject any live inventory writes on a zero-change full run; generation count stays one and the trusted checkpoint advances.
+- Metadata-only changes trigger no path/order/live-canonical writes and retain old object values without old path duplication.
+- Object update + deletion with an injected checkpoint failure rolls back inventory, history and checkpoint; retry succeeds. A partial observation batch with an injected SQLite error rolls back, poisons the comparison, refuses sealing and restarts through interrupted-run recovery.
+- Aliases observed in opposite metadata states across batches of 1 and 1,024 retain last-observation semantics; opaque roots preserve history and exclude adjacent names.
+- Mixed churn (delete, rename, resize, hard links, raw non-UTF-8 path) matches fresh-generation inventory and signed semantic ledger; retained records reconstruct the original inventory. Cross-classification transfer has a balanced debit/credit pair.
+- Version reconstruction survives deletion/replacement and backwards timestamps; unpublished history pins retention, only contiguous published prefixes expire, referenced retired generations remain protected.
+- Populated schema 7 migrates to 8 without replacing inventory/checkpoint/report payload.
+- Real Control progress, daily E0–E1 event replay/loss/recovery, cancellation, report recovery, FULL WAL crash/pinned-reader tests continue in the normal suite. The new comparingInventory phase is cancellable and cannot jump directly to commit.
+
+Reproduction (run separately; process I/O benchmarks must not overlap):
+
+```bash
+# 100k production W6; omit DAILYDISK_WRITE_REUSE for full-generation control.
+DAILYDISK_DAILY_WRITE_TEST=1 DAILYDISK_WRITE_WAL=bounded \
+  DAILYDISK_WRITE_BATCH=1024 DAILYDISK_WRITE_REUSE=1 \
+  DAILYDISK_WRITE_CHANGED_PERCENT=3 swift test --filter dailyFullWriteBudget
+
+# Use DAILYDISK_WRITE_CHANGED_PERCENT=100 for metadata high churn;
+# add DAILYDISK_WRITE_ROWS=1000000 for the million-row low-change workload.
+DAILYDISK_RUN_STRESS=1 swift test --filter millionRecordInventory
+
+# Earlier independent storage prototype; not the production result.
+DAILYDISK_W6_STRESS=1 swift test --filter w6WriteMeasurement
+```
+
+100k final production W6: initial build 177,508,352 B / 3.889 s; zero change 352,256 B / 2.290 s plus 16,384 B pruning; 3% change 29,417,472 B / 2.805 s plus 200,704 B pruning. The same-fixture full-generation control wrote 171,872,256 B / 5.082 s and 206,168,064 B / 5.968 s, plus 56,999,936 B and 58,277,888 B pruning. Two subsequent cycles including cleanup reduced process writes by 93.9%. Initial construction and forced compaction are excluded from that percentage. Final W6 allocated DB after forced compaction: 36,679,680 B; compaction itself wrote 73,334,784 B. WAL/RSS peaks were 43,169,392 B / 132,710,400 B.
+
+100k all-object metadata changes: W6 326,008,832 B / 19.676 s, pruning 5,804,032 B; control 420,372,480 B / 11.792 s, pruning 58,277,888 B. The W6 write advantage does not mean a speed advantage at high churn. W6 WAL/RSS peaked at 170,044,792 B / 315,703,296 B, and forced compaction separately wrote 428,470,272 B. A single atomic transaction can exceed the inter-transaction WAL threshold. These are Debug synthetic process counters, not NAND writes, installed full scan time, or a guarantee for all workloads.
+
+Intermediate failures and repairs are retained as evidence:
+
+- An incremental build after public model changes produced SIGBUS; a clean rebuild passed. Adding an enum phase also produced mismatched phase values in incrementally linked tests; clean rebuild restored the expected sequence. The exact toolchain root cause is not proven.
+- An early progress change attempted scanningFiles → reconciling before catch-up, which real Control rejected. It was replaced by a dedicated comparingInventory phase and transition/UI coverage.
+- A full suite was observed stuck in Foundation Process.waitUntilExit after the sqlite3 crash-test child had disappeared. The synthetic WAL test now bounds kernel-exit observation to ten seconds; that stalled run was terminated and is not counted as passing.
+- A retained-history fixture reused a sample timestamp and failed invalidSampleChronology. Increasing the second sample time fixed the fixture without weakening chronology validation.
+- An early point-query W6 implementation took about 10–12 s for 100k subsequent cycles. Batched prefetch removed that overhead.
+- High-churn testing exposed a per-object target-prefix scan in canonicalOverlayPath; sampling and EXPLAIN confirmed the query plan. That slow test was terminated. Explicit existing-index identity bounds, object-only persistence and batched canonical reuse fixed the regression; the final high-churn run completed in 28.502 s across all three cycles and forced compaction. The opt-in workload now bounds sealing time to detect recurrence.
+
+Before installation, still run signed bundle/GUI/helper acceptance and observe the next naturally due real scan. Synthetic testing does not cover every actual APFS/FSEvents churn pattern or physical ENOSPC boundary. Do not repeat real full scans just to obtain a benchmark.
+
+
+Final million-row W6 production run: all three cycles plus pruning, verification and forced compaction passed in **121.096 s**. Initial build: 1,966,112,768 B / 45.254 s; unchanged: 352,256 B / 22.975 s (+16,384 B cleanup); 3% changed: 300,101,632 B / 29.829 s (+1,773,568 B cleanup). Forced compaction separately wrote 1,105,477,632 B / 14.698 s; final allocated DB 368,472,064 B. Peak WAL 371,591,072 B, peak RSS 231,489,536 B. No matching final million-row full-generation control was run, so the 100k percentage is not extrapolated. Earlier million prototype/adapter numbers are superseded by this final production run for performance reporting.
+
+
+Final default concurrent suite passed **295 tests in 7.716 s** (five opt-in workloads disabled). Format, LaunchAgent lint and whitespace checks passed. The original million-row combined regression initially finished in 461.258 s with six count assertions failing: its 32-removal incremental fixture never persisted a sample or report, so the new unpublished-history pin correctly retained the old generation. The fixture now publishes a validated incremental sample/report before testing expiry; no assertion or production recovery protection was relaxed. The corrected full rerun passed in **441.180 s**. Opaque preservation took 63.333 s, full diff 28.273 s; both retirement/compaction cycles left one generation and the expected path count. Post-VACUUM lookup/commit took 0.024/0.006 s; mixed incremental seal/derive/commit took 0.120/0.092/0.188 s. No production retention guard was weakened. Final `swift build`, formatting, LaunchAgent lint and whitespace checks passed.
+
+
+Pushed main commit `92509b6` also passed [GitHub Actions](https://github.com/Nu1sance/DailyDisk/actions/runs/36974155134). That CI run covers main, not the local W6 branch. W6 remains unpushed and uninstalled.

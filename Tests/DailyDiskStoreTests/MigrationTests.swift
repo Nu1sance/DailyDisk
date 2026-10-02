@@ -169,3 +169,33 @@ func dailyFullReportMigration() throws {
     #expect(try db.scalarText("PRAGMA integrity_check") == "ok")
     try DatabaseMigrator.migrate(db)
 }
+
+@Test("Schema eight adds delta recovery without replacing populated schema seven inventory")
+func fullReuseMigration() throws {
+    let url = try temporaryDatabaseURL()
+    defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+    let db = try SQLiteDatabase(url: url)
+    try DatabaseMigrator.migrate(db, targetVersion: 7)
+    try db.execute(
+        """
+        INSERT INTO storage_domains VALUES('domain','disk','Test',1);
+        INSERT INTO volumes VALUES('volume','domain',NULL,NULL,NULL,1,NULL,'Data','data',1,0,0,1,'topology','full');
+        INSERT INTO scan_runs(id,kind,reason,status,started_at,finished_at,error_count) VALUES('run','full','manual','succeeded',1,2,0);
+        INSERT INTO inventory_generations VALUES('active','volume','run','active',1,NULL);
+        INSERT INTO checkpoints VALUES('volume','journal',123,'active','topology',NULL,2);
+        INSERT INTO hybrid_nodes VALUES(1,NULL,x'61');
+        INSERT INTO hybrid_objects VALUES(1,1,1,1,'regular',100,128,1,NULL,NULL);
+        INSERT INTO hybrid_paths VALUES(1,1,1,1,1,'ordinary');
+        INSERT INTO hybrid_order VALUES(1,x'61',1);
+        INSERT INTO hybrid_canonical VALUES(1,1,1,1,1,'ordinary');
+        INSERT INTO daily_reports VALUES('run','domain',2,0,0,0,0,0,0,x'010203',0,2);
+        """)
+    try DatabaseMigrator.migrate(db)
+    #expect(try db.scalarInt64("PRAGMA user_version") == 8)
+    #expect(try db.scalarInt64("SELECT allocated_bytes FROM hybrid_objects") == 128)
+    #expect(try db.scalarInt64("SELECT last_committed_event_id FROM checkpoints") == 123)
+    #expect(try db.scalarText("SELECT hex(payload_json) FROM daily_reports") == "010203")
+    #expect(try db.scalarInt64("SELECT COUNT(*) FROM inventory_reuse_history") == 0)
+    #expect(try db.verifyHybridOrdering() == 0)
+    #expect(try db.scalarText("PRAGMA integrity_check") == "ok")
+}

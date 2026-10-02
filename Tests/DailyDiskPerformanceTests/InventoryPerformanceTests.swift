@@ -179,6 +179,9 @@ func millionRecordInventory() async throws {
         topologyFingerprint: volume.topologyFingerprint,
         lastSuccessfulIncrementalAt: finishedAt, lastSuccessfulFullScanAt: finishedAt
     )
+    let incrementalSample = try StorageSample(
+        storageDomainID: domain.id, sampledAt: finishedAt.addingTimeInterval(0.5),
+        capacityBytes: 1_000_000, usedBytes: 0, availableBytes: 1_000_000)
     let incrementalCommit = try ScanCommit(
         runID: incremental.id, runKind: .incremental,
         scope: StorageDomainScope(domain: domain, volumes: [volume]),
@@ -188,7 +191,7 @@ func millionRecordInventory() async throws {
             volumeID: volume.id, eventStoreUUID: volume.eventStoreUUID,
             highestFullyDeliveredEventID: 20, phase: .liveFlush, trust: .trusted
         ),
-        changes: changes, storageSamples: [], snapshotSamples: []
+        changes: changes, storageSamples: [incrementalSample], snapshotSamples: []
     )
     let commitStarted = Date()
     try await store.commit(incrementalCommit, finishedAt: finishedAt)
@@ -230,11 +233,14 @@ func millionRecordInventory() async throws {
     let initialSample = try StorageSample(
         storageDomainID: domain.id, sampledAt: finishedAt,
         capacityBytes: 1_000_000, usedBytes: 0, availableBytes: 1_000_000)
-    func publish(_ runID: ScanRun.ID, sample: StorageSample, previous: StorageSample?) async throws {
+    func publish(
+        _ runID: ScanRun.ID, sample: StorageSample, previous: StorageSample?,
+        reportChanges: [ChangeRecord] = []
+    ) async throws {
         let report = try DailyReport(
             runID: runID, generatedAt: sample.sampledAt, storageDomainID: domain.id,
             accounting: SpaceAccounting.summarize(
-                changes: [], scope: scope, previousSample: previous, currentSample: sample),
+                changes: reportChanges, scope: scope, previousSample: previous, currentSample: sample),
             reconciliation: nil,
             coverage: ScanCoverage(
                 visitedPathCount: UInt64(count - 32), indexedObjectCount: UInt64(count - 32),
@@ -242,12 +248,15 @@ func millionRecordInventory() async throws {
             largestGrowth: [], largestShrinkage: [], diagnostics: [])
         try await store.commitReport(
             ReportCommit(
-                runID: runID, scope: scope, changes: [], previousStorageSample: previous,
+                runID: runID, scope: scope, changes: reportChanges, previousStorageSample: previous,
                 currentStorageSample: sample, previousOverheadSample: nil, currentOverheadSample: nil, report: report))
     }
     try await publish(run.id, sample: initialSample, previous: nil)
+    // W6 pins unpublished history. Complete the earlier incremental report
+    // before testing expiry rather than weakening its recovery protection.
+    try await publish(incremental.id, sample: incrementalSample, previous: initialSample, reportChanges: changes)
     var previousCheckpoint = nextCheckpoint
-    var previousSample = initialSample
+    var previousSample = incrementalSample
     // Repeat authoritative activation, retirement, expiry and native compaction.
     // Daily incremental failure is intentionally not fixed by this workload.
     for cycle in 0..<2 {

@@ -1601,7 +1601,7 @@ func dailyFullReportsSnapshotDifference() async throws {
         outcome.reconciliation.snapshotChanges.contains { $0.pathAfter?.displayString == "a" && $0.allocatedDelta > 0 })
     #expect(
         outcome.reconciliation.snapshotChanges.contains { $0.pathAfter?.displayString == "b" && $0.allocatedDelta > 0 })
-    #expect(outcome.checkpoint.activeGenerationID != fixture.baselineCheckpoint.activeGenerationID)
+    #expect(outcome.checkpoint.activeGenerationID == fixture.baselineCheckpoint.activeGenerationID)
 
     let reportDirectory = fixture.databaseRoot.appendingPathComponent("Reports", isDirectory: true)
     let generated = try await DailyReportCoordinator(

@@ -26,6 +26,7 @@ public enum ScanProgressPhase: String, Codable, CaseIterable, Sendable {
     case replayingEvents
     case scanningFiles
     case preservingOpaqueInventory
+    case comparingInventory
     case catchingUpEvents
     case sealingInventory
     case reconciling
@@ -55,6 +56,7 @@ public enum ScanProgressPhase: String, Codable, CaseIterable, Sendable {
         switch self {
         case .queued, .waitingForWriter, .preparing, .discoveringStorage,
             .recoveringInterruptedRun, .replayingEvents, .scanningFiles, .preservingOpaqueInventory,
+            .comparingInventory,
             .catchingUpEvents, .sealingInventory, .reconciling,
             .collectingDiagnostics:
             true
@@ -73,7 +75,7 @@ public enum ScanProgressPhase: String, Codable, CaseIterable, Sendable {
         case .recoveringInterruptedRun: 3
         case .discoveringStorage: 4
         case .replayingEvents: 5
-        case .scanningFiles, .preservingOpaqueInventory: 6
+        case .scanningFiles, .preservingOpaqueInventory, .comparingInventory: 6
         case .catchingUpEvents: 7
         case .sealingInventory: 8
         case .reconciling: 9
@@ -577,9 +579,10 @@ public enum ScanProgressTransitionValidator {
             return next == .scanningFiles || next == .catchingUpEvents
                 || next == .sealingInventory || next == .preparing
         case .scanningFiles:
-            return next == .preservingOpaqueInventory || next == .catchingUpEvents || next == .sealingInventory
+            return next == .preservingOpaqueInventory || next == .comparingInventory || next == .catchingUpEvents
+                || next == .sealingInventory
                 || next == .preparing
-        case .preservingOpaqueInventory:
+        case .preservingOpaqueInventory, .comparingInventory:
             return next == .catchingUpEvents || next == .sealingInventory || next == .preparing
         case .catchingUpEvents:
             return next == .sealingInventory || next == .preparing

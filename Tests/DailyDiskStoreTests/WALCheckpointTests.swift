@@ -56,7 +56,6 @@ func boundedWALCrashRecovery() async throws {
     try child.run()
     defer {
         if child.isRunning { kill(child.processIdentifier, SIGKILL) }
-        child.waitUntilExit()
         try? input.fileHandleForWriting.close()
     }
     try input.fileHandleForWriting.write(
@@ -80,8 +79,16 @@ func boundedWALCrashRecovery() async throws {
     }
     #expect(
         (try FileManager.default.attributesOfItem(atPath: url.path + "-wal")[.size] as? NSNumber)?.intValue ?? 0 > 0)
-    kill(child.processIdentifier, SIGKILL)
-    child.waitUntilExit()
+    let pid = child.processIdentifier
+    #expect(kill(pid, SIGKILL) == 0)
+    let exitDeadline = Date().addingTimeInterval(10)
+    // Bound exit observation: a concurrent test run was observed stuck in
+    // waitUntilExit after the child was gone. Kernel exit is sufficient here.
+    while kill(pid, 0) == 0 {
+        guard Date() < exitDeadline else { throw POSIXError(.ETIMEDOUT) }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    guard errno == ESRCH else { throw POSIXError(.ECHILD) }
     let recovered = try SQLiteDatabase(url: url, checkpointPolicy: .bounded())
     #expect(try recovered.scalarInt64("SELECT COUNT(*) FROM probe") == 1)
     #expect(try recovered.scalarInt64("SELECT value FROM probe") == 1)

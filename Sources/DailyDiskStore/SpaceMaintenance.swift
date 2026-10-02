@@ -61,6 +61,9 @@ extension SQLiteInventoryStore {
             if force { throw SpaceMaintenanceError.recoveryPending }
             return
         }
+        let hasReuseHistory = try database.scalarInt64("SELECT EXISTS(SELECT 1 FROM inventory_reuse_history)") == 1
+        if hasReuseHistory { try await observer.transition(to: .cleaningRetiredInventory, mode: nil) }
+        try pruneReuseHistory(at: now)
         let policy = SpaceMaintenancePolicy()
         let initialUsage = try database.spaceUsage()
         let expired = try retirementCandidates(at: now, window: policy.recoveryWindow)
@@ -73,7 +76,7 @@ extension SQLiteInventoryStore {
         let lastAttempt = try database.scalarDouble("SELECT attempted_at FROM space_maintenance WHERE singleton = 1")
             .map(Date.init(timeIntervalSince1970:))
         guard force || policy.shouldCompact(usage: usage, lastAttempt: lastAttempt, now: now) else {
-            if !expired.isEmpty { try await observer.transition(to: .preparing, mode: nil) }
+            if !expired.isEmpty || hasReuseHistory { try await observer.transition(to: .preparing, mode: nil) }
             return
         }
         let available: Int64
@@ -148,6 +151,7 @@ extension SQLiteInventoryStore {
 
     public func pruneRetiredGenerations(at now: Date = Date()) throws {
         guard try maintenanceIsIdle() else { return }
+        try pruneReuseHistory(at: now)
         let candidates = try retirementCandidates(at: now, window: SpaceMaintenancePolicy().recoveryWindow)
         guard !candidates.isEmpty else { return }
         try database.transaction {
@@ -169,6 +173,7 @@ extension SQLiteInventoryStore {
                   SELECT r.id FROM inventory_generations r
                   WHERE r.volume_id = g.volume_id AND r.state = 'retired'
                   ORDER BY r.retired_at DESC, r.created_at DESC, r.id DESC LIMIT 1))
+              AND NOT EXISTS (SELECT 1 FROM inventory_reuse_history h WHERE h.generation_id = g.id)
               AND NOT EXISTS (SELECT 1 FROM run_targets t WHERE t.base_generation_id = g.id)
               AND NOT EXISTS (SELECT 1 FROM checkpoints c WHERE c.active_generation_id = g.id)
               AND EXISTS (

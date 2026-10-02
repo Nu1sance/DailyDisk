@@ -75,17 +75,7 @@ final class HybridInventoryWriter {
                 try? membership.reset()
                 try? order.reset()
             }
-            try object.bind(generation, at: 1)
-            try object.bind(volume, at: 2)
-            try object.bind(Int64(bitPattern: record.object.identity.deviceID), at: 3)
-            try object.bind(Int64(bitPattern: record.object.identity.inode), at: 4)
-            try object.bind(record.object.kind.rawValue, at: 5)
-            try object.bind(record.object.footprint.logicalBytes, at: 6)
-            try object.bind(record.object.footprint.allocatedBytes, at: 7)
-            try object.bind(Int64(bitPattern: record.object.linkCount), at: 8)
-            try object.bind(record.object.modifiedAt?.timeIntervalSince1970, at: 9)
-            try object.bind(record.object.metadataChangedAt?.timeIntervalSince1970, at: 10)
-            _ = try object.step()
+            try writeObject(record.object)
             try membership.bind(generation, at: 1)
             try membership.bind(volume, at: 2)
             try membership.bind(node, at: 3)
@@ -103,6 +93,22 @@ final class HybridInventoryWriter {
             cache.removeAll(keepingCapacity: true)
             throw error
         }
+    }
+
+    func writeObject(_ value: InventoryObject) throws {
+        guard value.identity.volumeID.rawValue == externalVolume else { throw StoreInvariantError.volumeMismatch }
+        defer { try? object.reset() }
+        try object.bind(generation, at: 1)
+        try object.bind(volume, at: 2)
+        try object.bind(Int64(bitPattern: value.identity.deviceID), at: 3)
+        try object.bind(Int64(bitPattern: value.identity.inode), at: 4)
+        try object.bind(value.kind.rawValue, at: 5)
+        try object.bind(value.footprint.logicalBytes, at: 6)
+        try object.bind(value.footprint.allocatedBytes, at: 7)
+        try object.bind(Int64(bitPattern: value.linkCount), at: 8)
+        try object.bind(value.modifiedAt?.timeIntervalSince1970, at: 9)
+        try object.bind(value.metadataChangedAt?.timeIntervalSince1970, at: 10)
+        _ = try object.step()
     }
 
     private func intern(_ path: Data) throws -> Int64 {

@@ -133,11 +133,11 @@ A full scan uses two event sessions:
 
 1. Daily-full path: establish a trusted current-journal pre-scan cursor `E0`, without replaying yesterday’s committed history. Legacy scheduled reconciliation retains its original behavior, but is not selected by the daily policy.
 2. Stop the first session.
-3. Traverse into a staging generation.
+3. Traverse all metadata; schema-8 daily checks reuse an existing baseline through a difference overlay, while initial/legacy checks build staging.
 4. Open a second historical session from `E0`.
-5. Replay scan-time events into staging; daily full compares against unchanged previous inventory. Legacy reconciliation also maintains expected state.
+5. Replay scan-time events into the authoritative view; daily full compares against unchanged committed inventory. Legacy reconciliation also maintains expected state.
 6. Flush a final cursor `E1`.
-7. Seal, reconcile, and atomically activate staging with `E1`.
+7. Seal, reconcile, and atomically apply W6 differences/old values with `E1`, or activate initial/legacy staging.
 
 This avoids buffering the entire full-scan interval in memory.
 
@@ -534,11 +534,12 @@ Incremental attribution must join `hybrid_generations` and `hybrid_objects` dire
 - [ ] W3：实验 compact canonical 暂存或 inactive staging 一次构建，减少路径重复和提交复制；收益成立再新增迁移。
 - [ ] W4：排序表窄键布局和旧代删除写入分别实验，保留 raw-byte seek、FK、恢复窗口和原子激活。
 - [ ] W5：明确历史 ledger 保留/汇总与编码策略；不得未经授权淘汰旧明细。
-- [ ] **W6 主方案（用户 2026-10-02 决策）**：每日完整读取、差异持久化；一份当前库存 + 本轮变更暂存 + 短期旧值恢复，复用未变化对象/路径/排序/canonical。独立分支开发，不按实现成本后置。先 W1，再 W6，吸收 W3/W4；W5 不作为前置条件。详细设计/验收见 Docs/WriteOptimizationReview.md。
-- [ ] W6 不得逐条写 last_seen、复制全代成员关系、长时间钉住 WAL 或用近似结构判删除；批量比较与精确访问标记必须有界。硬链接对象与路径分开处理，opaque 继承，E0/E1 和原子激活不弱化。早期删除旧库存授权不延伸到本次，迁移保留 schema 7 数据。
+- [x] **W6 分支源码实现（用户 2026-10-02 决策）**：每日完整读取、差异持久化；一份当前库存 + 本轮变更暂存 + 短期旧值恢复，复用未变化对象/路径/排序/canonical。独立分支开发，不按实现成本后置。已接入生产 Store/coordinator；主线和已安装应用仍为 schema 7，分支为 schema 8。W1 细项、W3/W4 布局实验与实机验收独立追踪，W5 不作为前置条件。详细设计/验收见 Docs/WriteOptimizationReview.md。
+- [x] W6 源码约束：不得逐条写 last_seen、复制全代成员关系、长时间钉住 WAL 或用近似结构判删除；批量比较与精确访问标记必须有界。硬链接对象与路径分开处理，opaque 继承，E0/E1 和原子激活不弱化。早期删除旧库存授权不延伸到本次，迁移保留 schema 7 数据。
+- [ ] W6 发布验收：保持本地分支，安装前验证签名/GUI-helper 同步/新进度阶段与自然到期实机写入；扩展高变化目录改名/大量增删及真实 ENOSPC 故障矩阵。已有高变化元数据用例仍有 CPU 时间取舍，不能声称所有负载更快。
 - [x] 主线小改动：对象 NULL-safe no-op UPDATE 与相同排序映射 UPDATE 跳过，保留 membership/coverage/seal 语义；收益不外推全量扫描。
 
-184.64 MB 是两个提交前占用采样的差，缺少前一日逐表/空闲页/WAL 快照，不能归因成今天提交的约 6 万条 ledger。空间复用与累计写入是两个指标。此次仅更新审查与规划，不修改生产算法或安装。
+184.64 MB 是两个提交前占用采样的差，缺少前一日逐表/空闲页/WAL 快照，不能归因成今天提交的约 6 万条 ledger。空间复用与累计写入是两个指标。原始审查阶段仅更新规划；随后主线 no-op 防护与本地 W6 实现见文末记录，安装仍未变化。
 
 
 ### 当前优先级：每日默认全量与低写入设计（2026-10-01）
@@ -1047,3 +1048,18 @@ Installed acceptance update (2026-10-01): Computer Use access is now working. Re
 
 
 2026-10-02 主线发布准备：W6 提升为主要低写入架构，详见 Docs/WriteOptimizationReview.md。新增相同对象/排序映射 no-op UPDATE 防护，membership 返回值、opaque 计数、seal 失效和冲突检测不变。默认并发 276 项通过（7.001 秒，4 个 opt-in 未启用）；格式、构建、LaunchAgent lint、diff 检查及两个开发诊断脚本的 5 项测试通过。此前已验收的 schema 7/05:00/探针改动一并提交；不把小改动宣称为 W6 完成，不更新本机安装或触发扫描。
+
+
+### W6 full observation / delta persistence (schema 8, local branch)
+
+Current branch `feature/w6-delta-inventory` implements W6; main was pushed at `92509b6`, and the installed app remains schema 7. Migration 008 adds old-value recovery tables without copying or resetting existing inventory/reports. Subsequent daily full scans compare 1,024-record batches with 256-path prefetches against the current baseline plus run overlay; unchanged objects/paths/order/canonical are reused. Metadata-only changes stage/apply object values without path mutations or live canonical rewrites. Preserve hard-link observation order across batches. Exact sparse seen bits mark existing node IDs, never every row's last_seen; payload is capped at 64 MiB plus map overhead. Incomplete/failed comparisons cannot seal and must restart.
+
+Deletion detection pages by generation/path ID and excludes opaque raw-byte subtrees. `comparingInventory` is a new cancellable Control phase, requiring GUI/helper upgrades together. E0–E1 compensation updates the same difference overlay. Full ordering auditing reads the base; canonical/ledger work is identity-bounded. Preserve the explicit mutation object index/range in canonicalOverlayPath: high-churn testing found target-prefix scans became quadratic.
+
+Commit atomically stores changed old values, applies candidate mutations/canonical rows, writes signed ledger/samples and advances the checkpoint while retaining the generation ID. All in-place incremental commits also preserve old values so retained history stays reconstructable. Retention removes only expired published version prefixes and pins referenced generations; version order must remain safe across clock reversal. No historical-report deletion, fresh database, weaker durability, long-lived WAL reader or installation is authorized by this source task. See Docs/Database.md and Docs/Testing.md for invariants, evidence and remaining rollout gates.
+
+
+W6 source validation: default concurrent suite passed 295 tests in 7.716 s (five opt-in workloads disabled). Production 100k matched control measures 93.9% fewer process writes across zero-change + 3% cycles including cleanup; 100% metadata churn uses fewer writes but takes 19.68 s versus 11.79 s in the changed cycle. Million-row W6 completed in 121.096 s: unchanged 352 KB / 22.97 s, 3% changes 300.10 MB / 29.83 s. These are synthetic Debug process counters, not installed scan or NAND claims. Existing files do not immediately shrink on schema-8 migration; legacy retirement cleanup/free-page reuse/VACUUM policy still applies. Intermediate failures and fixture repairs are documented in Docs/Testing.md rather than counted as passes.
+
+
+Final W6 validation: original million-row full/incremental/opaque/retirement/VACUUM regression passed in 441.180 s after completing its previously unpublished incremental report fixture. All six prior count failures were caused by the intentional history pin; assertions and production retention stayed intact. Final build, format, LaunchAgent lint and whitespace checks pass. Main `92509b6` CI also passed; W6 is committed locally only and is not installed. Do not equate synthetic coverage with completed signed-app/natural-scan acceptance.

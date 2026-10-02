@@ -4,7 +4,9 @@ DailyDisk is a GUI-first, source-built macOS disk-growth monitor. Click **立即
 
 ## Internal-beta storage transition
 
-Current source builds use schema 7 on top of the schema-6 compact inventory. Upgrading from schema 6 preserves inventory, checkpoints and historical reports; do not reset history for this update. Migration 007 adds direct inventory-comparison accounting and durable report-publication timestamps. The earlier transition from the legacy inventory to schema 6 required a fresh beta database; that historical instruction does not apply to this update.
+This W6 development branch uses schema 8. Daily full checks still read all file metadata, but subsequent checks persist only changes to the current inventory, with old values retained for a short recovery window. Unchanged files do not receive daily `last_seen` updates or new generation membership. Initial baselines still require a complete build. See [the write review](Docs/WriteOptimizationReview.md) for measurements and limits.
+
+Migrations 007/008 preserve existing schema-6/7 inventory, checkpoints and historical reports; do not reset history for this update. The installed app remains schema 7 until separately upgraded. GUI/helper/CLI must be updated together because W6 adds a progress phase. The earlier legacy-to-schema-6 fresh-database transition does not apply.
 
 ## What it monitors
 

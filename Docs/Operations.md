@@ -69,13 +69,13 @@ A full scan does not buffer an entire traversal's live events in memory:
 
 1. Open the current journal without yesterday’s cursor and flush a trusted pre-scan cursor `E0` (daily full). Legacy event-reconciliation recovery may still replay prior history.
 2. Stop that session.
-3. Traverse into a staging generation.
+3. Traverse all metadata; on W6 with a baseline, compare batches and stage differences. Otherwise build a staging generation.
 4. Open a new historical session from `E0`.
-5. Replay scan-time events from the durable journal into staging; daily full leaves the previous inventory unchanged for comparison.
+5. Replay scan-time events into the authoritative overlay; committed inventory remains unchanged until commit.
 6. Flush a final concrete cursor `E1`.
-7. Seal, compare previous inventory with final staging, revalidate current volume identity, and atomically activate staging with `E1`.
+7. Seal, compare previous and final logical inventory, revalidate identity, then atomically apply W6 deltas with retained old values and E1 (or activate initial/legacy staging).
 
-If the journal cannot cover the interval, the staging generation is discarded and a fresh topology/journal recovery is attempted.
+If the journal cannot cover the interval, the uncommitted delta overlay/staging generation is discarded and a fresh topology/journal recovery is attempted.
 
 ## Permission boundaries
 
@@ -233,3 +233,6 @@ Mailbox trust loss now aborts replay cooperatively before consuming further queu
 Private ScanProbes records include optional `processWriteBytes` on helper start/end, request start/end and phase changes. Counters are sampled when the event is enqueued, not when the log queue writes it. Compare only records with the same process identity; a missing field means the OS counter was unavailable. These are process-attributed disk writes, not file allocation or SSD NAND wear, and exclude notification child processes. They enable one naturally due full-run acceptance without repeatedly scanning user data.
 
 Schema 7 preserves schema-6 inventory and historical reports. The old schema-6 reset instructions above describe the earlier beta transition and must not be repeated for this upgrade.
+
+
+W6 source adds the cancellable **正在核对已删除的文件** phase after traversal. Its exact seen bitmap is memory-only, so a stopped run restarts comparison after normal abandoned-overlay cleanup; it never resumes deletion inference from incomplete coverage. Successful daily checks normally retain one current inventory plus 24-hour changed old values. Initial/legacy recovery generations may still coexist temporarily. Rebuild GUI/helper/CLI together before installing; this branch has not replaced the installed schema-7 app.

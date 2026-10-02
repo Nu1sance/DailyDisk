@@ -32,6 +32,8 @@ func dailyFullWriteBudget() async throws {
     let env = ProcessInfo.processInfo.environment
     let count = Int(env["DAILYDISK_WRITE_ROWS"] ?? "100000")!
     let batchSize = Int(env["DAILYDISK_WRITE_BATCH"] ?? "512")!
+    let reuse = env["DAILYDISK_WRITE_REUSE"] == "1"
+    let changedPercent = Int(env["DAILYDISK_WRITE_CHANGED_PERCENT"] ?? "0")!
     let bounded = env["DAILYDISK_WRITE_WAL"] == "bounded"
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("DailyFullWrite-\(UUID())")
     let url = root.appendingPathComponent("DailyDisk.sqlite")
@@ -65,8 +67,17 @@ func dailyFullWriteBudget() async throws {
         let io = try dailyUsage().ri_diskio_byteswritten
         let run = ScanRun(kind: .full, reason: .dailySchedule, status: .running, startedAt: start)
         try await store.begin(run: run)
-        let generation = try await store.createStagingGeneration(volumeID: volume.id, runID: run.id, at: start)
-        let target = InventoryMutationTarget.stagingGeneration(generation.id)
+        let reusing = reuse && previousCheckpoint != nil
+        let generationID: InventoryGeneration.ID
+        let target: InventoryMutationTarget
+        if reusing {
+            #expect(try await store.beginFullComparison(volumeID: volume.id, runID: run.id))
+            generationID = previousCheckpoint!.activeGenerationID
+            target = .expectedActive(volumeID: volume.id)
+        } else {
+            generationID = try await store.createStagingGeneration(volumeID: volume.id, runID: run.id, at: start).id
+            target = .stagingGeneration(generationID)
+        }
         for offset in stride(from: 0, to: count, by: batchSize) {
             var records: [InventoryRecord] = []
             for i in offset..<min(offset + batchSize, count) {
@@ -76,39 +87,54 @@ func dailyFullWriteBudget() async throws {
                     try InventoryRecord(
                         object: InventoryObject(
                             identity: identity, kind: .regular,
-                            footprint: FileFootprint(logicalBytes: 4096, allocatedBytes: 4096), linkCount: 1,
+                            footprint: FileFootprint(
+                                logicalBytes: cycle == 2 && i % 100 < changedPercent ? 8192 : 4096,
+                                allocatedBytes: cycle == 2 && i % 100 < changedPercent ? 8192 : 4096), linkCount: 1,
                             modifiedAt: nil, metadataChangedAt: nil),
                         path: InventoryPath(
                             volumeID: volume.id, relativePath: path, parentPath: parent, objectIdentity: identity)))
             }
-            try await store.append(records: records, to: generation.id)
+            if reusing {
+                try await store.observeFullComparison(records: records, volumeID: volume.id, runID: run.id)
+            } else {
+                try await store.append(records: records, to: generationID)
+            }
         }
+        if reusing {
+            try await store.finishFullComparison(
+                opaqueRoots: [], volumeID: volume.id, runID: run.id, observer: TaskOnlyScanWorkObserver())
+        }
+        let sealStart = Date()
         try await store.finalizeCanonicalAttribution(target: target, runID: run.id, consume: { _ in })
+        // Catch a per-candidate scan of the entire delta table at high churn.
+        #expect(Date().timeIntervalSince(sealStart) < 10 + Double(count) / 10000)
         let changes = try await store.deriveSnapshotChanges(
             authoritative: target, runID: run.id, observer: TaskOnlyScanWorkObserver())
-        #expect(changes.isEmpty)
+        #expect(changes.count == (cycle == 2 ? (0..<count).filter { $0 % 100 < changedPercent }.count : 0))
         let date = Date(timeIntervalSince1970: epoch + Double(cycle))
         let sample = try StorageSample(
             storageDomainID: domain.id, sampledAt: date,
             capacityBytes: 10_000_000_000, usedBytes: 1_000_000_000, availableBytes: 9_000_000_000)
         let checkpoint = Checkpoint(
             volumeID: volume.id, eventStoreUUID: volume.eventStoreUUID,
-            lastCommittedEventID: UInt64(cycle + 1), activeGenerationID: generation.id,
+            lastCommittedEventID: UInt64(cycle + 1), activeGenerationID: generationID,
             topologyFingerprint: volume.topologyFingerprint, lastSuccessfulIncrementalAt: nil,
             lastSuccessfulFullScanAt: date)
         try await store.commit(
             ScanCommit(
                 runID: run.id, runKind: .full, scope: scope, volumeID: volume.id,
-                activatedGenerationID: generation.id, previousCheckpoint: previousCheckpoint, checkpoint: checkpoint,
+                activatedGenerationID: reusing ? nil : generationID, previousCheckpoint: previousCheckpoint,
+                checkpoint: checkpoint,
                 eventFence: EventCursorFence(
                     volumeID: volume.id, eventStoreUUID: volume.eventStoreUUID,
                     highestFullyDeliveredEventID: UInt64(cycle + 1), phase: .liveFlush, trust: .trusted),
-                changes: changes, storageSamples: [sample], snapshotSamples: [], comparesSnapshots: true),
+                changes: changes, storageSamples: [sample], snapshotSamples: [], comparesSnapshots: true,
+                reusesActiveInventory: reusing),
             finishedAt: date)
         let report = try DailyReport(
             runID: run.id, generatedAt: date, storageDomainID: domain.id,
             accounting: SpaceAccounting.summarize(
-                changes: [], scope: scope, previousSample: previousSample, currentSample: sample),
+                changes: changes, scope: scope, previousSample: previousSample, currentSample: sample),
             reconciliation: nil,
             coverage: ScanCoverage(
                 visitedPathCount: UInt64(count), indexedObjectCount: UInt64(count),
@@ -116,7 +142,7 @@ func dailyFullWriteBudget() async throws {
             diagnostics: [])
         try await store.commitReport(
             ReportCommit(
-                runID: run.id, scope: scope, changes: [], previousStorageSample: previousSample,
+                runID: run.id, scope: scope, changes: changes, previousStorageSample: previousSample,
                 currentStorageSample: sample, previousOverheadSample: nil, currentOverheadSample: nil, report: report))
         print(
             "DAILY_WRITE wal=\(bounded) batch=\(batchSize) rows=\(count) cycle=\(cycle) phase=scan bytes=\(try dailyUsage().ri_diskio_byteswritten - io) seconds=\(Date().timeIntervalSince(start))"

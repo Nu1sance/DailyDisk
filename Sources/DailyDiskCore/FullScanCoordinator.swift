@@ -219,25 +219,46 @@ public struct FullScanCoordinator: Sendable {
 
                 await openedSession.stop()
                 session = nil
-                let generation = try await store.createStagingGeneration(
-                    volumeID: volume.id,
-                    runID: run.id,
-                    at: await clock.now()
-                )
-                let authoritativeTarget = InventoryMutationTarget.stagingGeneration(generation.id)
+                let reusesInventory: Bool
+                if comparesSnapshots, previousState != nil {
+                    reusesInventory = try await store.beginFullComparison(volumeID: volume.id, runID: run.id)
+                } else {
+                    reusesInventory = false
+                }
+                let generationID: InventoryGeneration.ID
+                if reusesInventory, let previousState {
+                    generationID = previousState.checkpoint.activeGenerationID
+                } else {
+                    generationID = try await store.createStagingGeneration(
+                        volumeID: volume.id, runID: run.id, at: await clock.now()
+                    ).id
+                }
+                let authoritativeTarget: InventoryMutationTarget =
+                    reusesInventory
+                    ? .expectedActive(volumeID: volume.id) : .stagingGeneration(generationID)
                 try await progressTracker.transition(to: .scanningFiles, mode: executionMode)
                 let fullResult = try await fullScanner.scan(
                     volume: volume,
                     runID: run.id,
                     observer: progressTracker
                 ) { batch in
-                    try await store.append(records: batch.records, to: generation.id)
+                    if reusesInventory {
+                        try await store.observeFullComparison(
+                            records: batch.records, volumeID: volume.id, runID: run.id)
+                    } else {
+                        try await store.append(records: batch.records, to: generationID)
+                    }
                 }
                 await progress.append(errors: fullResult.errors)
                 let opaqueRoots = fullResult.errors.compactMap { error in
                     error.kind.preservesOpaqueInventory ? error.path : nil
                 }
-                if previousState != nil, !opaqueRoots.isEmpty {
+                if reusesInventory {
+                    try await progressTracker.transition(to: .comparingInventory, mode: executionMode)
+                    try await store.finishFullComparison(
+                        opaqueRoots: opaqueRoots, volumeID: volume.id,
+                        runID: run.id, observer: progressTracker)
+                } else if previousState != nil, !opaqueRoots.isEmpty {
                     try await progressTracker.transition(to: .preservingOpaqueInventory, mode: executionMode)
                     try await store.preserveOpaqueSubtrees(
                         roots: opaqueRoots,
@@ -393,7 +414,7 @@ public struct FullScanCoordinator: Sendable {
                     volumeID: volume.id,
                     eventStoreUUID: eventStoreUUID,
                     lastCommittedEventID: liveFence.highestFullyDeliveredEventID,
-                    activeGenerationID: generation.id,
+                    activeGenerationID: generationID,
                     topologyFingerprint: volume.topologyFingerprint,
                     lastSuccessfulIncrementalAt: previousState?.checkpoint.lastSuccessfulIncrementalAt,
                     lastSuccessfulFullScanAt: finishedAt
@@ -403,7 +424,7 @@ public struct FullScanCoordinator: Sendable {
                     runKind: runKind,
                     scope: scope,
                     volumeID: volume.id,
-                    activatedGenerationID: generation.id,
+                    activatedGenerationID: reusesInventory ? nil : generationID,
                     previousCheckpoint: previousState?.checkpoint,
                     checkpoint: newCheckpoint,
                     eventFence: liveFence,
@@ -414,7 +435,8 @@ public struct FullScanCoordinator: Sendable {
                     overheadSample: diagnosticSamples.overhead,
                     coverage: fullResult.coverage,
                     scanErrors: await progress.scanErrors,
-                    comparesSnapshots: comparesSnapshots
+                    comparesSnapshots: comparesSnapshots,
+                    reusesActiveInventory: reusesInventory
                 )
                 try await progressTracker.transition(to: .committing, mode: executionMode)
                 ScanProbe.checkpoint(.commitProposed, commit.checkpoint)

@@ -251,6 +251,7 @@ public struct CanonicalAttributionBatch: Sendable {
 }
 
 public struct ScanCommit: Codable, Equatable, Sendable {
+    public let reusesActiveInventory: Bool
     public let comparesSnapshots: Bool
     public let runID: ScanRun.ID
     public let runKind: ScanRun.Kind
@@ -289,12 +290,22 @@ public struct ScanCommit: Codable, Equatable, Sendable {
             transientErrorCount: 0
         ),
         scanErrors: [ScanErrorRecord] = [],
-        comparesSnapshots: Bool = false
+        comparesSnapshots: Bool = false,
+        reusesActiveInventory: Bool = false
     ) throws {
         guard !comparesSnapshots || (runKind != .incremental && changes.allSatisfy { $0.source == .snapshotComparison })
         else {
             throw ModelValidationError.invalidScanCommit
         }
+        guard
+            !reusesActiveInventory
+                || (comparesSnapshots && previousCheckpoint != nil
+                    && activatedGenerationID == nil
+                    && previousCheckpoint?.activeGenerationID == checkpoint.activeGenerationID)
+        else {
+            throw ModelValidationError.invalidScanCommit
+        }
+        self.reusesActiveInventory = reusesActiveInventory
         self.comparesSnapshots = comparesSnapshots
         guard let scopedVolume = scope.volumes.first(where: { $0.id == volumeID }),
             checkpoint.volumeID == volumeID,
@@ -345,8 +356,7 @@ public struct ScanCommit: Codable, Equatable, Sendable {
                             to: checkpoint.lastCommittedEventID
                         )
                 } ?? true
-            guard let activatedGenerationID,
-                activatedGenerationID == checkpoint.activeGenerationID,
+            guard reusesActiveInventory || activatedGenerationID == checkpoint.activeGenerationID,
                 fullScanCursorIsValid,
                 eventFence.map({ $0.phase == .liveFlush }) ?? true
             else {
@@ -409,6 +419,7 @@ public struct ScanCommit: Codable, Equatable, Sendable {
         case runKind
         case scope
         case volumeID
+        case reusesActiveInventory
         case comparesSnapshots
         case activatedGenerationID
         case previousCheckpoint
@@ -453,7 +464,8 @@ public struct ScanCommit: Codable, Equatable, Sendable {
                     transientErrorCount: 0
                 ),
             scanErrors: container.decodeIfPresent([ScanErrorRecord].self, forKey: .scanErrors) ?? [],
-            comparesSnapshots: container.decodeIfPresent(Bool.self, forKey: .comparesSnapshots) ?? false
+            comparesSnapshots: container.decodeIfPresent(Bool.self, forKey: .comparesSnapshots) ?? false,
+            reusesActiveInventory: container.decodeIfPresent(Bool.self, forKey: .reusesActiveInventory) ?? false
         )
     }
 }
@@ -612,6 +624,12 @@ public protocol InventoryStoring: Sendable {
     func scanRun(id: ScanRun.ID) async throws -> ScanRun?
     func state(for volumeID: MonitoredVolume.ID) async throws -> InventoryState?
     func begin(run: ScanRun) async throws
+
+    func beginFullComparison(volumeID: MonitoredVolume.ID, runID: ScanRun.ID) async throws -> Bool
+    func observeFullComparison(records: [InventoryRecord], volumeID: MonitoredVolume.ID, runID: ScanRun.ID) async throws
+    func finishFullComparison(
+        opaqueRoots: [RelativePath], volumeID: MonitoredVolume.ID, runID: ScanRun.ID,
+        observer: any ScanWorkObserving) async throws
 
     func createStagingGeneration(
         volumeID: MonitoredVolume.ID,
@@ -795,6 +813,17 @@ public protocol InventoryStoring: Sendable {
 }
 
 extension InventoryStoring {
+    public func beginFullComparison(volumeID: MonitoredVolume.ID, runID: ScanRun.ID) async throws -> Bool { false }
+    public func observeFullComparison(records: [InventoryRecord], volumeID: MonitoredVolume.ID, runID: ScanRun.ID)
+        async throws
+    {
+        throw ModelValidationError.invalidScanCommit
+    }
+    public func finishFullComparison(
+        opaqueRoots: [RelativePath], volumeID: MonitoredVolume.ID, runID: ScanRun.ID,
+        observer: any ScanWorkObserving
+    ) async throws { throw ModelValidationError.invalidScanCommit }
+
     public func stageRemovalSubtree(
         root: RelativePath,
         target: InventoryMutationTarget,

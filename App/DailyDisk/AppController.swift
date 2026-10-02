@@ -314,6 +314,7 @@ final class AppController: ObservableObject {
                     }
                 case .queued, .waitingForWriter, .preparing, .discoveringStorage,
                     .recoveringInterruptedRun, .replayingEvents, .scanningFiles, .preservingOpaqueInventory,
+                    .comparingInventory,
                     .catchingUpEvents, .sealingInventory, .reconciling,
                     .collectingDiagnostics:
                     if cancellation?.requestID == progress.requestID {

@@ -336,3 +336,35 @@ func missingFullCompletionMarker() async throws {
     #expect(try await reader.report(runID: baseline.run.id) != nil)
     #expect(try await reader.latestSuccessfulFullReportDate(for: fixture.scope.domain.id) == nil)
 }
+
+@Test("Retired generation pruning honors W6 history references until their recovery window expires")
+func retirementPinsReuseHistory() async throws {
+    let fixture = try await StoreFixture()
+    defer { fixture.removeFiles() }
+    let baseline = try await establishBaseline(in: fixture)
+    try await publishBaseline(baseline, in: fixture)
+    let older = try addRetiredInventory(to: fixture, retiredAt: 100)
+    _ = try addRetiredInventory(to: fixture, retiredAt: 200)
+    let db = try SQLiteDatabase(url: fixture.databaseURL)
+    let insert = try db.prepare(
+        "INSERT INTO inventory_reuse_history(run_id,generation_id,retired_at,checkpoint) VALUES(?,?,?,?)")
+    try insert.bind(baseline.run.id.rawValue.uuidString, at: 1)
+    try insert.bind(older, at: 2)
+    try insert.bind(300000.0, at: 3)
+    let retainedCheckpoint = Checkpoint(
+        volumeID: fixture.volume.id, eventStoreUUID: fixture.volume.eventStoreUUID,
+        lastCommittedEventID: baseline.checkpoint.lastCommittedEventID,
+        activeGenerationID: InventoryGeneration.ID(try #require(UUID(uuidString: older))),
+        topologyFingerprint: fixture.volume.topologyFingerprint,
+        lastSuccessfulIncrementalAt: nil,
+        lastSuccessfulFullScanAt: baseline.checkpoint.lastSuccessfulFullScanAt)
+    try insert.bind(JSONEncoder().encode(retainedCheckpoint), at: 4)
+    _ = try insert.step()
+    try await fixture.store.pruneRetiredGenerations(at: Date(timeIntervalSince1970: 300001))
+    #expect(try db.scalarInt64("SELECT COUNT(*) FROM inventory_generations WHERE state='retired'") == 1)
+    #expect(try db.scalarInt64("SELECT COUNT(*) FROM inventory_reuse_history") == 1)
+    try await fixture.store.pruneRetiredGenerations(at: Date(timeIntervalSince1970: 400000))
+    #expect(try db.scalarInt64("SELECT COUNT(*) FROM inventory_generations WHERE state='retired'") == 0)
+    #expect(try db.scalarInt64("SELECT COUNT(*) FROM inventory_reuse_history") == 0)
+    #expect(try db.scalarInt64("SELECT COUNT(*) FROM daily_reports") == 1)
+}

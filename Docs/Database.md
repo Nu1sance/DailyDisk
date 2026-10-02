@@ -22,7 +22,7 @@ The app may replay already delivered FSEvents after a power loss, so inventory o
 
 ## Schema migration
 
-The current application schema is version 7. First launch prepares the local database and applies bundled migrations automatically; source-build users do not install a database server or run SQL setup scripts. The system SQLite library is linked through `CSQLite`.
+The current W6 branch schema is version 8; the installed app remains version 7. First launch prepares the local database and applies bundled migrations automatically; source-build users do not install a database server or run SQL setup scripts. The system SQLite library is linked through `CSQLite`.
 
 `schema_metadata` records every applied migration version and stable name. `PRAGMA user_version` must exactly match the latest contiguous metadata row before any migration runs. DailyDisk rejects:
 
@@ -36,7 +36,7 @@ Migration resources are listed explicitly in `DatabaseMigrator`; filenames are n
 
 ## Inventory generations
 
-Each monitored volume has at most one active generation. Full scans write to a staging generation without changing the current checkpoint. On successful reconciliation, one transaction:
+Each monitored volume has at most one active generation. Initial baselines and legacy reconciliation write to a staging generation without changing the current checkpoint. Daily full checks with an existing baseline reuse that generation through the schema-8 delta protocol below. On successful reconciliation, one transaction:
 
 1. verifies the previous checkpoint
 2. verifies the run owns the staging generation
@@ -50,7 +50,7 @@ Each monitored volume has at most one active generation. Full scans write to a s
 
 A failure rolls back every item above. The previous active generation and checkpoint remain paired.
 
-Migration 005 records `retired_at` when an active generation is replaced. Existing retired generations receive a fresh 24-hour window at migration time. After the replacement generation has a persisted report, idle helper maintenance retains at most the newest retired generation for 24 hours. Older retired generations can then be removed; the newest can be removed after expiry. Running scans, overlays, staging inventories, pending reports, and checkpoint references block unsafe cleanup. Failed or interrupted scans still remove only their own staging state.
+Migration 005 records `retired_at` when an active generation is replaced. Existing retired generations receive a fresh 24-hour window at migration time. After the replacement generation has a persisted report, idle helper maintenance retains at most the newest retired generation for 24 hours. Older retired generations can then be removed; the newest can be removed after expiry. Running scans, overlays, staging inventories, pending reports, checkpoint references, and schema-8 recovery-history references block unsafe cleanup. Failed or interrupted scans still remove only their own staging state.
 
 Retired cleanup no longer runs inside the activation transaction. It runs before new work and after successful report publication. If the helper does not run, expiry alone does not wake it. In particular, daily scans started less than 24 hours after retirement may still temporarily hold three generations. Historical reports, ledger rows and samples are retained independently.
 
@@ -195,3 +195,20 @@ The user authorized deletion of old inventory and installation with a fresh base
 Daily full scanning compares baseline canonical objects directly with sealed staging, without duplicating an expected-active event overlay. Commit rederives the snapshot ledger and atomically activates inventory with its trusted E1 checkpoint. Migration 007 adds `daily_reports.snapshot_compared_delta` (old rows default to zero) and `published_at`, plus `scan_runs.inventory_completed_at`. Completion is recorded only after inventory COMMIT; if this follow-up marker cannot be written, a published report alone does not satisfy daily work. New publication times are recorded after artifacts are written; retries retain the original persisted timestamp. Historical rows use `generated_at` because the original publication time was not recorded. This upgrade preserves schema-6 inventory and old report payloads.
 
 SQLite WAL experiments and adopted limits are recorded in [DailyFullScan.md](DailyFullScan.md). FULL durability, writer leases, crash recovery and strict CLI refusal of nonempty WAL remain mandatory. A single atomic transaction can exceed an inter-transaction WAL threshold; do not describe that threshold as a hard cap on transaction size. The 24-hour retired recovery window and seven-day automatic compaction cooldown remain unchanged. No daily unconditional VACUUM is introduced.
+
+
+## Daily inventory reuse (schema 8, W6 branch)
+
+Migration 008 only adds `inventory_reuse_history`, `inventory_reuse_old_objects` and `inventory_reuse_old_paths`; it does not convert, copy or delete schema-7 inventory or reports. The compact current tables and raw-byte ordering stay in place. The initial baseline and legacy full/recovery generation path remain supported.
+
+`beginFullComparison` pins the previous checkpoint. Each scanner batch (at most 1,024 records) is prefetched in groups of 256 indexed path lookups, including pending object/path overlays. Comparison preserves observation order across aliases and batches. Exact unchanged records write no object/path/order/canonical rows. Metadata-only changes stage/apply an object value without rewriting path membership/order or unchanged canonical rows. Existing node IDs enter a sparse, exact in-memory bitmap: 4,096 IDs per 512-byte chunk, at most 131,072 chunks (64 MiB payload, plus dictionary overhead). It is never sized from maximum inode or node ID. Exhaustion aborts safely; it is not a lossy deletion filter.
+
+After traversal, a `(generation_id, path_id)` seek pages 1,024 baseline paths at a time. Unseen paths outside opaque roots become tombstones. New paths were already staged; opaque historical rows remain inherited rather than copied. A failed batch or interrupted comparison cannot be sealed or resumed from a partial bitmap. Recovery discards the overlay and restarts traversal. The GUI shows `comparingInventory` during deletion detection.
+
+E0–E1 compensation applies to the same overlay. Full ordering completeness/equivalence is audited by reads; canonical attribution is rebuilt only for affected identities. The canonical overlay query explicitly bounds the mutation branch by device/inode using its existing partial object index: a target-only lookup per identity becomes quadratic on high-change runs.
+
+One FULL-durability transaction verifies the previous checkpoint and sealed semantic ledger, saves changed old object/path values, applies mutations and affected canonical rows, writes ledger/samples, advances E1 and marks success. `ScanCommit.reusesActiveInventory` requires snapshot comparison and the same generation ID. The run remains a full scan with snapshot-comparison accounting. Commit/report cancellation boundaries are unchanged.
+
+Every in-place commit, including subsequent incremental commits, saves its prior checkpoint and changed old values so it cannot break an earlier retained baseline. A null old value means that key did not previously exist. Monotonic history versions, not wall-clock order, define the chain. `retainedRecord(before:path:)` resolves an old path/object lazily without copying a historical inventory or pinning WAL readers. This is an internal recovery-read API, not a GUI rollback feature.
+
+Idle maintenance keeps a contiguous history suffix covering the 24-hour window and unpublished reports; even a backwards clock cannot remove a needed intermediate version. Only expired published prefixes are removed, under the non-cancellable cleanup progress boundary. Referenced generations remain pinned until their history expires. Old path bytes are stored directly, so node garbage collection cannot destroy historical path reconstruction. Historical reports/ledger/samples remain subject to existing retention, and VACUUM remains threshold/cooldown driven.

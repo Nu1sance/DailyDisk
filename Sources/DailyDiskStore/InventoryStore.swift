@@ -13,6 +13,14 @@ public actor SQLiteInventoryStore: InventoryStoring {
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
     private let clock: any Clock
+    private struct FullComparisonSession {
+        let checkpoint: Checkpoint
+        var seen = W6SeenPaths()
+        var finished = false
+        var finishing = false
+        var failed = false
+    }
+    private var fullComparisons: [ScanRun.ID: FullComparisonSession] = [:]
 
     public init(databaseURL: URL = SQLiteInventoryStore.defaultDatabaseURL) throws {
         try self.init(databaseURL: databaseURL, checkpointPolicy: .bounded())
@@ -63,6 +71,7 @@ public actor SQLiteInventoryStore: InventoryStoring {
                 """
             )
         }
+        fullComparisons.removeAll()
     }
 
     public func interrupt(runID: ScanRun.ID, finishedAt: Date) async throws {
@@ -97,6 +106,7 @@ public actor SQLiteInventoryStore: InventoryStoring {
             try generations.bind(runID.rawValue.uuidString, at: 1)
             _ = try generations.step()
         }
+        fullComparisons.removeValue(forKey: runID)
     }
 
     public func activeRuns() async throws -> [ScanRun] {
@@ -696,10 +706,16 @@ public actor SQLiteInventoryStore: InventoryStoring {
         let descriptor = try resolve(target: authoritative, runID: runID)
         try verifyTargetSealed(descriptor, runID: runID)
         guard let previous = try loadState(for: descriptor.volumeID)?.checkpoint else { return [] }
-        let changes = try await collectTransitionChanges(
-            from: .generation(previous.activeGenerationID), to: .overlay(descriptor, runID),
-            source: .snapshotComparison, runID: runID, observer: observer
-        )
+        let changes: [ChangeRecord]
+        if fullComparisons[runID] != nil {
+            changes = try await withScanCancellationMonitoring(observer: observer) {
+                try await self.reuseSnapshotChanges(descriptor: descriptor, runID: runID)
+            }
+        } else {
+            changes = try await collectTransitionChanges(
+                from: .generation(previous.activeGenerationID), to: .overlay(descriptor, runID),
+                source: .snapshotComparison, runID: runID, observer: observer)
+        }
         try verifyTargetSealed(descriptor, runID: runID)
         try verifyPreviousCheckpoint(previous, volumeID: descriptor.volumeID)
         return changes
@@ -811,15 +827,57 @@ public actor SQLiteInventoryStore: InventoryStoring {
                     """
                 )
 
-                if descriptor.kind == "active", runKind == .incremental {
-                    let candidates = try incrementalCandidateIdentities(descriptor: descriptor, runID: runID)
-                    for (index, identity) in candidates.enumerated() {
-                        if index.isMultiple(of: 256) { try Task.checkCancellation() }
+                if descriptor.kind == "active", runKind == .incremental || fullComparisons[runID] != nil {
+                    if let comparison = fullComparisons[runID] {
+                        guard comparison.finished, !comparison.failed else { throw StoreInvariantError.targetNotSealed }
                         guard
                             try database.verifyHybridOrdering(
-                                generation: database.hybridGenerationKey(descriptor.baseGenerationID),
-                                identity: identity) == 0
+                                generation: database.hybridGenerationKey(descriptor.baseGenerationID)) == 0
                         else { throw StoreInvariantError.corruptStoredValue("hybrid path ordering") }
+                    }
+                    let comparing = fullComparisons[runID] != nil
+                    if comparing {
+                        // Object-only changes keep canonical paths; copy only their candidate
+                        // facts in one indexed statement, then recompute path-affected identities.
+                        let copy = try database.prepare(
+                            """
+                            INSERT INTO run_canonical_attributions
+                            SELECT m.run_id,m.target_kind,m.target_id,m.volume_id,m.device_id,m.inode,d.path,c.classification
+                            FROM run_object_mutations m
+                            CROSS JOIN hybrid_canonical c ON c.generation_id=?1 AND c.device_id=m.device_id AND c.inode=m.inode
+                            CROSS JOIN hybrid_order d ON d.generation_id=c.generation_id AND d.path_id=c.path_id
+                            WHERE m.run_id=?2 AND m.target_kind=?3 AND m.target_id=?4
+                            """)
+                        try copy.bind(database.hybridGenerationKey(descriptor.baseGenerationID), at: 1)
+                        try copy.bind(runID.rawValue.uuidString, at: 2)
+                        try copy.bind(descriptor.kind, at: 3)
+                        try copy.bind(descriptor.id, at: 4)
+                        _ = try copy.step()
+                    }
+                    let candidates = try incrementalCandidateIdentities(
+                        descriptor: descriptor, runID: runID, includeObjectOnly: !comparing)
+                    let clearCandidate = try database.prepare(
+                        """
+                        DELETE FROM run_canonical_attributions
+                        WHERE run_id=? AND target_kind=? AND target_id=? AND device_id=? AND inode=?
+                        """)
+                    for (index, identity) in candidates.enumerated() {
+                        if index.isMultiple(of: 256) { try Task.checkCancellation() }
+                        if comparing {
+                            try clearCandidate.reset()
+                            try clearCandidate.bind(runID.rawValue.uuidString, at: 1)
+                            try clearCandidate.bind(descriptor.kind, at: 2)
+                            try clearCandidate.bind(descriptor.id, at: 3)
+                            try clearCandidate.bind(sqliteInteger(identity.deviceID), at: 4)
+                            try clearCandidate.bind(sqliteInteger(identity.inode), at: 5)
+                            _ = try clearCandidate.step()
+                        } else {
+                            guard
+                                try database.verifyHybridOrdering(
+                                    generation: database.hybridGenerationKey(descriptor.baseGenerationID),
+                                    identity: identity) == 0
+                            else { throw StoreInvariantError.corruptStoredValue("hybrid path ordering") }
+                        }
                         if let path = try canonicalOverlayPath(
                             identity: identity,
                             descriptor: descriptor,
@@ -978,8 +1036,13 @@ public actor SQLiteInventoryStore: InventoryStoring {
             try upsert(scope: commit.scope)
             try verifyPreviousCheckpoint(commit.previousCheckpoint, volumeID: commit.volumeID)
 
+            if commit.reusesActiveInventory {
+                guard let comparison = fullComparisons[commit.runID], comparison.finished, !comparison.failed,
+                    comparison.checkpoint == commit.previousCheckpoint
+                else { throw StoreInvariantError.targetNotSealed }
+            }
             switch commit.runKind {
-            case .incremental:
+            case _ where commit.reusesActiveInventory, .incremental:
                 let descriptor = try resolve(
                     target: .expectedActive(volumeID: commit.volumeID),
                     runID: commit.runID
@@ -992,11 +1055,17 @@ public actor SQLiteInventoryStore: InventoryStoring {
                     runID: commit.runID,
                     allowCancellation: false
                 )
+                try preserveReuseHistory(commit: commit, descriptor: descriptor, candidates: candidates)
                 try clearCanonicalAttributions(
                     generationID: descriptor.baseGenerationID,
-                    identities: candidates
+                    identities: commit.reusesActiveInventory
+                        ? incrementalCandidateIdentities(
+                            descriptor: descriptor, runID: commit.runID,
+                            allowCancellation: false, includeObjectOnly: false) : candidates
                 )
-                try applyMutations(runID: commit.runID, descriptor: descriptor, orphanCandidates: candidates)
+                try applyMutations(
+                    runID: commit.runID, descriptor: descriptor, orphanCandidates: candidates,
+                    applyObjectOnly: commit.reusesActiveInventory)
                 try applyIncrementalCanonicalAttributions(
                     runID: commit.runID,
                     descriptor: descriptor,
@@ -1058,6 +1127,7 @@ public actor SQLiteInventoryStore: InventoryStoring {
             try cleanupStagingState(runID: commit.runID)
             try pruneGenerations(volumeID: commit.volumeID, runID: commit.runID)
         }
+        fullComparisons.removeValue(forKey: commit.runID)
         if commit.runKind != .incremental {
             let completedAt = await clock.now()
             // COMMIT has already succeeded. Failure to record completion must
@@ -1408,6 +1478,7 @@ public actor SQLiteInventoryStore: InventoryStoring {
             try removeGenerations.bind(runID.rawValue.uuidString, at: 1)
             _ = try removeGenerations.step()
         }
+        fullComparisons.removeValue(forKey: runID)
     }
 }
 
@@ -2064,13 +2135,14 @@ extension SQLiteInventoryStore {
                   )
                 UNION ALL
                 SELECT m.volume_id, m.path, m.parent_path, m.device_id, m.inode, m.classification
-                FROM run_mutations m
+                FROM run_mutations m INDEXED BY run_mutations_target_object_path_idx
                 WHERE m.run_id = ? AND m.target_kind = ? AND m.target_id = ?
+                  AND m.device_id = ?8 AND m.inode = ?9
                   AND m.operation = 'upsert'
             )
             SELECT volume_id, path, parent_path, device_id, inode, classification
             FROM merged
-            WHERE device_id = ? AND inode = ?
+            WHERE device_id = ?8 AND inode = ?9
             ORDER BY path
             LIMIT 1
             """
@@ -2207,6 +2279,13 @@ extension SQLiteInventoryStore {
         runID: ScanRun.ID,
         path: RelativePath
     ) throws -> InventoryRecord? {
+        let statement = try overlayRecordStatement(descriptor: descriptor, runID: runID)
+        try statement.bind(path.bytes, at: 11)
+        guard try statement.step() else { return nil }
+        return try decodeInventoryRecord(from: statement, startingAt: 0)
+    }
+
+    private func overlayRecordStatement(descriptor: TargetDescriptor, runID: ScanRun.ID) throws -> SQLiteStatement {
         let statement = try database.prepare(
             """
             WITH merged AS (
@@ -2250,9 +2329,7 @@ extension SQLiteInventoryStore {
             """
         )
         try bindOverlayIdentity(statement, descriptor: descriptor, runID: runID)
-        try statement.bind(path.bytes, at: 11)
-        guard try statement.step() else { return nil }
-        return try decodeInventoryRecord(from: statement, startingAt: 0)
+        return statement
     }
 
     fileprivate func bindOverlayIdentity(
@@ -2392,6 +2469,12 @@ extension SQLiteInventoryStore {
         }
 
         switch commit.runKind {
+        case _ where commit.reusesActiveInventory:
+            for change in try reuseSnapshotChanges(
+                descriptor: authoritative, runID: commit.runID, allowCancellation: false)
+            {
+                try consumeExpected(change)
+            }
         case .incremental:
             for change in try deriveIncrementalChanges(
                 descriptor: authoritative,
@@ -2823,13 +2906,14 @@ extension SQLiteInventoryStore {
     fileprivate func incrementalCandidateIdentities(
         descriptor: TargetDescriptor,
         runID: ScanRun.ID,
-        allowCancellation: Bool = true
+        allowCancellation: Bool = true, includeObjectOnly: Bool = true
     ) throws -> Set<FileIdentity> {
         let statement = try database.prepare(
             """
             SELECT volume_id, device_id, inode
-            FROM run_object_mutations
+            FROM \(includeObjectOnly ? "run_object_mutations" : "run_mutations")
             WHERE run_id = ? AND target_kind = ? AND target_id = ?
+              \(includeObjectOnly ? "" : "AND operation = 'upsert'")
             UNION
             SELECT p.volume_id, p.device_id, p.inode
             FROM run_mutations m
@@ -3120,7 +3204,8 @@ extension SQLiteInventoryStore {
     }
 
     fileprivate func applyMutations(
-        runID: ScanRun.ID, descriptor: TargetDescriptor, orphanCandidates: Set<FileIdentity>? = nil
+        runID: ScanRun.ID, descriptor: TargetDescriptor, orphanCandidates: Set<FileIdentity>? = nil,
+        applyObjectOnly: Bool = false
     ) throws {
         let statement = try database.prepare(
             """
@@ -3153,6 +3238,33 @@ extension SQLiteInventoryStore {
                 )
             } else {
                 try writer.write(decodeInventoryRecord(from: statement, startingAt: 1))
+            }
+        }
+        if applyObjectOnly {
+            let objects = try database.prepare(
+                """
+                SELECT volume_id,device_id,inode,kind,logical_bytes,allocated_bytes,link_count,modified_at,metadata_changed_at
+                FROM run_object_mutations WHERE run_id=? AND target_kind=? AND target_id=?
+                """)
+            try objects.bind(runID.rawValue.uuidString, at: 1)
+            try objects.bind(descriptor.kind, at: 2)
+            try objects.bind(descriptor.id, at: 3)
+            while try objects.step() {
+                guard let volume = objects.columnText(0),
+                    let kind = objects.columnText(3).flatMap(FileKind.init(rawValue:))
+                else { throw StoreInvariantError.corruptStoredValue("object mutation") }
+                try writer.writeObject(
+                    InventoryObject(
+                        identity: FileIdentity(
+                            volumeID: MonitoredVolume.ID(volume),
+                            deviceID: unsignedInteger(objects.columnInt64(1)),
+                            inode: unsignedInteger(objects.columnInt64(2))),
+                        kind: kind,
+                        footprint: FileFootprint(
+                            logicalBytes: objects.columnInt64(4), allocatedBytes: objects.columnInt64(5)),
+                        linkCount: unsignedInteger(objects.columnInt64(6)),
+                        modifiedAt: optionalDate(objects, column: 7),
+                        metadataChangedAt: optionalDate(objects, column: 8)))
             }
         }
         try removeOrphanObjects(generationID: descriptor.baseGenerationID, identities: orphanCandidates)
@@ -3192,6 +3304,13 @@ extension SQLiteInventoryStore {
             FROM hybrid_generations g CROSS JOIN run_canonical_attributions c
             CROSS JOIN hybrid_order d ON d.generation_id=g.id AND d.path=c.path
             WHERE g.external_id=? AND c.run_id=? AND c.target_kind=? AND c.target_id=?
+              AND NOT EXISTS (SELECT 1 FROM hybrid_canonical old
+                WHERE old.generation_id=g.id AND old.device_id=c.device_id AND old.inode=c.inode
+                  AND old.path_id=d.path_id AND old.classification=c.classification)
+            ON CONFLICT(generation_id,device_id,inode) DO UPDATE SET
+              path_id=excluded.path_id,classification=excluded.classification
+            WHERE hybrid_canonical.path_id IS NOT excluded.path_id
+              OR hybrid_canonical.classification IS NOT excluded.classification
             """
         )
         try insert.bind(generationID.rawValue.uuidString, at: 1)
@@ -3734,5 +3853,345 @@ extension SQLiteInventoryStore {
 
     fileprivate func unsignedInteger(_ value: Int64) -> UInt64 {
         UInt64(bitPattern: value)
+    }
+}
+
+extension SQLiteInventoryStore {
+    public func beginFullComparison(volumeID: MonitoredVolume.ID, runID: ScanRun.ID) async throws -> Bool {
+        try requireRunningRun(runID)
+        guard let checkpoint = try loadState(for: volumeID)?.checkpoint else { return false }
+        guard fullComparisons[runID] == nil, try loadRunKind(runID) == .full else {
+            throw StoreInvariantError.invalidRunState
+        }
+        _ = try resolve(target: .expectedActive(volumeID: volumeID), runID: runID)
+        fullComparisons[runID] = FullComparisonSession(checkpoint: checkpoint)
+        return true
+    }
+
+    public func observeFullComparison(records: [InventoryRecord], volumeID: MonitoredVolume.ID, runID: ScanRun.ID)
+        async throws
+    {
+        guard var comparison = fullComparisons[runID], !comparison.finished, !comparison.finishing, !comparison.failed,
+            records.count <= InventoryRecordBatch.maximumRecordCount
+        else { throw StoreInvariantError.invalidRunState }
+        try requireRunningRun(runID)
+        let descriptor = try resolve(target: .expectedActive(volumeID: volumeID), runID: runID)
+        try verifyPreviousCheckpoint(comparison.checkpoint, volumeID: volumeID)
+        var success = false
+        defer { if !success { fullComparisons[runID]?.failed = true } }
+        let prefetched = try comparisonBatch(records.map(\.path.relativePath), descriptor: descriptor, runID: runID)
+        var observedObjects: [FileIdentity: InventoryObject] = [:]
+        var observedPaths: [RelativePath: InventoryRecord] = [:]
+        try database.transaction {
+            let mutation = try database.prepare(Self.stageMutationSQL)
+            let object = try database.prepare(Self.stageObjectMutationSQL)
+            var dirty = false
+            for (index, record) in records.enumerated() {
+                if index.isMultiple(of: 256) { try Task.checkCancellation() }
+                guard record.path.volumeID == volumeID else { throw StoreInvariantError.volumeMismatch }
+                let old = prefetched[record.path.relativePath]
+                if let id = old?.0 { try comparison.seen.insert(id) }
+                var existing = observedPaths[record.path.relativePath] ?? old?.1
+                if let value = existing, let observed = observedObjects[value.object.identity] {
+                    existing = try InventoryRecord(object: observed, path: value.path)
+                }
+                observedObjects[record.object.identity] = record.object
+                observedPaths[record.path.relativePath] = record
+                if existing == record { continue }
+                if existing?.path != record.path {
+                    try mutation.reset()
+                    try bindMutation(
+                        mutation, runID: runID, descriptor: descriptor, operation: "upsert", record: record,
+                        removedPath: nil)
+                    _ = try mutation.step()
+                }
+                try object.reset()
+                try bindObjectMutation(object, runID: runID, descriptor: descriptor, object: record.object)
+                _ = try object.step()
+                dirty = true
+            }
+            if dirty { try markTargetDirty(runID: runID, kind: descriptor.kind, id: descriptor.id) }
+        }
+        fullComparisons[runID] = comparison
+        success = true
+    }
+
+    public func finishFullComparison(
+        opaqueRoots: [RelativePath], volumeID: MonitoredVolume.ID, runID: ScanRun.ID,
+        observer: any ScanWorkObserving
+    ) async throws {
+        guard var comparison = fullComparisons[runID], !comparison.finished, !comparison.finishing, !comparison.failed
+        else {
+            throw StoreInvariantError.invalidRunState
+        }
+        comparison.finishing = true
+        fullComparisons[runID] = comparison
+        var success = false
+        defer { if !success { fullComparisons[runID]?.failed = true } }
+        let generation = try database.hybridGenerationKey(comparison.checkpoint.activeGenerationID)
+        let descriptor = try resolve(target: .expectedActive(volumeID: volumeID), runID: runID)
+        var after: Int64 = 0
+        // Prefix comparisons use raw bytes, including the slash boundary (cache != cache-neighbor).
+        let roots = opaqueRoots.sorted { $0.bytes.lexicographicallyPrecedes($1.bytes) }
+        while true {
+            try await observer.checkpoint()
+            try requireRunningRun(runID)
+            try verifyPreviousCheckpoint(comparison.checkpoint, volumeID: volumeID)
+            let page = try database.prepare(
+                "SELECT path_id,path FROM hybrid_order WHERE generation_id=? AND path_id>? ORDER BY path_id LIMIT 1024")
+            try page.bind(generation, at: 1)
+            try page.bind(after, at: 2)
+            var removed: [RelativePath] = []
+            var count = 0
+            while try page.step() {
+                count += 1
+                after = page.columnInt64(0)
+                guard !comparison.seen.contains(after), let path = page.columnData(1) else { continue }
+                if roots.contains(where: {
+                    $0.bytes.isEmpty || path == $0.bytes || path.starts(with: $0.bytes + Data([47]))
+                }) {
+                    continue
+                }
+                removed.append(try RelativePath(validating: path))
+            }
+            if count == 0 { break }
+            if !removed.isEmpty {
+                try database.transaction {
+                    let mutation = try database.prepare(Self.stageMutationSQL)
+                    for path in removed {
+                        try mutation.reset()
+                        try bindMutation(
+                            mutation, runID: runID, descriptor: descriptor, operation: "remove", record: nil,
+                            removedPath: path)
+                        _ = try mutation.step()
+                    }
+                    try markTargetDirty(runID: runID, kind: descriptor.kind, id: descriptor.id)
+                }
+            }
+        }
+        comparison.finished = true
+        comparison.finishing = false
+        fullComparisons[runID] = comparison
+        success = true
+    }
+
+    private func comparisonBatch(_ paths: [RelativePath], descriptor: TargetDescriptor, runID: ScanRun.ID)
+        throws -> [RelativePath: (Int64?, InventoryRecord?)]
+    {
+        let generation = try database.hybridGenerationKey(descriptor.baseGenerationID)
+        var result: [RelativePath: (Int64?, InventoryRecord?)] = [:]
+        for offset in stride(from: 0, to: paths.count, by: 256) {
+            let batch = Array(paths[offset..<min(paths.count, offset + 256)])
+            let placeholders = batch.indices.map { "(?\($0 + 4))" }.joined(separator: ",")
+            let query = try database.prepare(
+                """
+                WITH requested(path) AS (VALUES \(placeholders))
+                SELECT r.path,d.path_id,COALESCE(m.device_id,p.device_id),COALESCE(m.inode,p.inode),
+                  COALESCE(om.kind,o.kind),COALESCE(om.logical_bytes,o.logical_bytes),
+                  COALESCE(om.allocated_bytes,o.allocated_bytes),COALESCE(om.link_count,o.link_count),
+                  CASE WHEN om.kind IS NOT NULL THEN om.modified_at ELSE o.modified_at END,
+                  CASE WHEN om.kind IS NOT NULL THEN om.metadata_changed_at ELSE o.metadata_changed_at END,
+                  COALESCE(m.classification,p.classification),m.operation
+                FROM requested r
+                LEFT JOIN hybrid_order d ON d.generation_id=?1 AND d.path=r.path
+                LEFT JOIN hybrid_paths p ON p.generation_id=d.generation_id AND p.path_id=d.path_id
+                LEFT JOIN run_mutations m ON m.run_id=?2 AND m.target_kind='active' AND m.target_id=?3 AND m.path=r.path
+                LEFT JOIN hybrid_objects o ON o.generation_id=?1
+                  AND o.device_id=COALESCE(m.device_id,p.device_id) AND o.inode=COALESCE(m.inode,p.inode)
+                LEFT JOIN run_object_mutations om ON om.run_id=?2 AND om.target_kind='active' AND om.target_id=?3
+                  AND om.device_id=COALESCE(m.device_id,p.device_id) AND om.inode=COALESCE(m.inode,p.inode)
+                """)
+            try query.bind(generation, at: 1)
+            try query.bind(runID.rawValue.uuidString, at: 2)
+            try query.bind(descriptor.id, at: 3)
+            for (index, path) in batch.enumerated() { try query.bind(path.bytes, at: Int32(index + 4)) }
+            while try query.step() {
+                guard let raw = query.columnData(0) else {
+                    throw StoreInvariantError.corruptStoredValue("comparison path")
+                }
+                let path = try RelativePath(validating: raw)
+                let node = query.columnIsNull(1) ? nil : query.columnInt64(1)
+                guard !query.columnIsNull(2), query.columnText(11) != "remove",
+                    let kind = query.columnText(4).flatMap(FileKind.init(rawValue:)),
+                    let classification = query.columnText(10).flatMap(InventoryClassification.init(rawValue:))
+                else {
+                    result[path] = (node, nil)
+                    continue
+                }
+                let identity = FileIdentity(
+                    volumeID: descriptor.volumeID,
+                    deviceID: unsignedInteger(query.columnInt64(2)), inode: unsignedInteger(query.columnInt64(3)))
+                let object = try InventoryObject(
+                    identity: identity, kind: kind,
+                    footprint: FileFootprint(logicalBytes: query.columnInt64(5), allocatedBytes: query.columnInt64(6)),
+                    linkCount: unsignedInteger(query.columnInt64(7)),
+                    modifiedAt: query.columnIsNull(8) ? nil : Date(timeIntervalSince1970: query.columnDouble(8)),
+                    metadataChangedAt: query.columnIsNull(9) ? nil : Date(timeIntervalSince1970: query.columnDouble(9)))
+                result[path] = (
+                    node,
+                    try InventoryRecord(
+                        object: object,
+                        path: InventoryPath(
+                            volumeID: descriptor.volumeID,
+                            relativePath: path, parentPath: PathPolicy.parent(of: path), objectIdentity: identity,
+                            classification: classification))
+                )
+            }
+        }
+        return result
+    }
+
+    private func reuseSnapshotChanges(descriptor: TargetDescriptor, runID: ScanRun.ID, allowCancellation: Bool = true)
+        throws -> [ChangeRecord]
+    {
+        let candidates = try incrementalCandidateIdentities(
+            descriptor: descriptor, runID: runID, allowCancellation: allowCancellation)
+        var changes: [ChangeRecord] = []
+        for (index, identity) in candidates.sorted(by: { compare($0, $1) == .orderedAscending }).enumerated() {
+            if allowCancellation, index.isMultiple(of: 256) { try Task.checkCancellation() }
+            changes += try objectTransitionRecords(
+                old: attributedFact(in: .generation(descriptor.baseGenerationID), identity: identity),
+                new: attributedFact(in: .overlay(descriptor, runID), identity: identity),
+                source: .snapshotComparison, runID: runID)
+        }
+        try ChangeSetValidator.validateAttributionTransfers(in: changes)
+        return changes
+    }
+
+    private func preserveReuseHistory(commit: ScanCommit, descriptor: TargetDescriptor, candidates: Set<FileIdentity>)
+        throws
+    {
+        guard let previous = commit.previousCheckpoint else { throw StoreInvariantError.checkpointMismatch }
+        let history = try database.prepare(
+            "INSERT INTO inventory_reuse_history(run_id,generation_id,retired_at,checkpoint) VALUES(?,?,?,?)")
+        try history.bind(commit.runID.rawValue.uuidString, at: 1)
+        try history.bind(descriptor.baseGenerationID.rawValue.uuidString, at: 2)
+        try history.bind(Date().timeIntervalSince1970, at: 3)
+        try history.bind(encoder.encode(previous), at: 4)
+        _ = try history.step()
+        let generation = try database.hybridGenerationKey(descriptor.baseGenerationID)
+        let objects = try database.prepare(
+            """
+            INSERT INTO inventory_reuse_old_objects
+            SELECT ?1,?2,?3,o.kind,o.logical_bytes,o.allocated_bytes,o.link_count,o.modified_at,o.metadata_changed_at
+            FROM (SELECT 1) LEFT JOIN hybrid_objects o ON o.generation_id=?4 AND o.device_id=?2 AND o.inode=?3
+            """)
+        for identity in candidates {
+            try objects.reset()
+            try objects.bind(commit.runID.rawValue.uuidString, at: 1)
+            try objects.bind(sqliteInteger(identity.deviceID), at: 2)
+            try objects.bind(sqliteInteger(identity.inode), at: 3)
+            try objects.bind(generation, at: 4)
+            _ = try objects.step()
+        }
+        let paths = try database.prepare(
+            """
+            INSERT INTO inventory_reuse_old_paths
+            SELECT ?1,m.path,p.device_id,p.inode,p.classification
+            FROM run_mutations m
+            LEFT JOIN hybrid_order d ON d.generation_id=?2 AND d.path=m.path
+            LEFT JOIN hybrid_paths p ON p.generation_id=d.generation_id AND p.path_id=d.path_id
+            WHERE m.run_id=?1 AND m.target_kind=?3 AND m.target_id=?4
+            """)
+        try paths.bind(commit.runID.rawValue.uuidString, at: 1)
+        try paths.bind(generation, at: 2)
+        try paths.bind(descriptor.kind, at: 3)
+        try paths.bind(descriptor.id, at: 4)
+        _ = try paths.step()
+    }
+
+    func pruneReuseHistory(at date: Date) throws {
+        // Called only under the idle maintenance gate, after pending reports recover.
+        try database.transaction {
+            let remove = try database.prepare(
+                """
+                DELETE FROM inventory_reuse_history WHERE version < COALESCE(
+                  (SELECT MIN(h.version) FROM inventory_reuse_history h WHERE h.retired_at>=?
+                    OR NOT EXISTS(SELECT 1 FROM daily_reports r WHERE r.run_id=h.run_id)),
+                  (SELECT MAX(version)+1 FROM inventory_reuse_history))
+                """)
+            try remove.bind(date.addingTimeInterval(-86400).timeIntervalSince1970, at: 1)
+            _ = try remove.step()
+        }
+    }
+}
+
+extension SQLiteInventoryStore {
+    /// Read one path from a retained logical baseline without materializing a historical inventory.
+    /// Undo values are applied logically; this API does not mutate or roll back the active checkpoint.
+    public func retainedRecord(before runID: ScanRun.ID, path: RelativePath) throws -> InventoryRecord? {
+        let history = try database.prepare(
+            "SELECT version,generation_id,checkpoint FROM inventory_reuse_history WHERE run_id=?")
+        try history.bind(runID.rawValue.uuidString, at: 1)
+        guard try history.step(), let id = history.columnText(1).flatMap(UUID.init(uuidString:)),
+            let payload = history.columnData(2)
+        else { throw StoreInvariantError.corruptStoredValue("retained inventory expired") }
+        let version = history.columnInt64(0)
+        let checkpoint = try decoder.decode(Checkpoint.self, from: payload)
+        let generation = InventoryGeneration.ID(id)
+        guard checkpoint.activeGenerationID == generation else { throw StoreInvariantError.checkpointMismatch }
+        let original = try loadRecord(generationID: generation, path: path)
+        let oldPath = try database.prepare(
+            """
+            SELECT p.device_id,p.inode,p.classification FROM inventory_reuse_history h
+            JOIN inventory_reuse_old_paths p ON p.run_id=h.run_id
+            WHERE h.generation_id=? AND h.version>=? AND p.path=? ORDER BY h.version LIMIT 1
+            """)
+        try oldPath.bind(generation.rawValue.uuidString, at: 1)
+        try oldPath.bind(version, at: 2)
+        try oldPath.bind(path.bytes, at: 3)
+        let identity: FileIdentity
+        let classification: InventoryClassification
+        if try oldPath.step() {
+            guard !oldPath.columnIsNull(0),
+                let kind = oldPath.columnText(2).flatMap(InventoryClassification.init(rawValue:))
+            else { return nil }
+            identity = FileIdentity(
+                volumeID: checkpoint.volumeID, deviceID: unsignedInteger(oldPath.columnInt64(0)),
+                inode: unsignedInteger(oldPath.columnInt64(1)))
+            classification = kind
+        } else if let original {
+            identity = original.object.identity
+            classification = original.path.classification
+        } else {
+            return nil
+        }
+        let object = try database.prepare(
+            """
+            SELECT o.kind,o.logical_bytes,o.allocated_bytes,o.link_count,o.modified_at,o.metadata_changed_at
+            FROM inventory_reuse_history h JOIN inventory_reuse_old_objects o ON o.run_id=h.run_id
+            WHERE h.generation_id=?1 AND h.version>=?2 AND o.device_id=?3 AND o.inode=?4
+            ORDER BY h.version LIMIT 1
+            """)
+        try object.bind(generation.rawValue.uuidString, at: 1)
+        try object.bind(version, at: 2)
+        try object.bind(sqliteInteger(identity.deviceID), at: 3)
+        try object.bind(sqliteInteger(identity.inode), at: 4)
+        let source: SQLiteStatement
+        if try object.step() {
+            source = object
+        } else {
+            let live = try database.prepare(
+                "SELECT kind,logical_bytes,allocated_bytes,link_count,modified_at,metadata_changed_at FROM hybrid_objects WHERE generation_id=? AND device_id=? AND inode=?"
+            )
+            try live.bind(database.hybridGenerationKey(generation), at: 1)
+            try live.bind(sqliteInteger(identity.deviceID), at: 2)
+            try live.bind(sqliteInteger(identity.inode), at: 3)
+            guard try live.step() else { throw StoreInvariantError.corruptStoredValue("retained object missing") }
+            source = live
+        }
+        guard let kind = source.columnText(0).flatMap(FileKind.init(rawValue:)) else {
+            throw StoreInvariantError.corruptStoredValue("retained object missing")
+        }
+        return try InventoryRecord(
+            object: InventoryObject(
+                identity: identity, kind: kind,
+                footprint: FileFootprint(logicalBytes: source.columnInt64(1), allocatedBytes: source.columnInt64(2)),
+                linkCount: unsignedInteger(source.columnInt64(3)),
+                modifiedAt: source.columnIsNull(4) ? nil : Date(timeIntervalSince1970: source.columnDouble(4)),
+                metadataChangedAt: source.columnIsNull(5) ? nil : Date(timeIntervalSince1970: source.columnDouble(5))),
+            path: InventoryPath(
+                volumeID: checkpoint.volumeID, relativePath: path, parentPath: PathPolicy.parent(of: path),
+                objectIdentity: identity, classification: classification))
     }
 }
