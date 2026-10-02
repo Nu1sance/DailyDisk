@@ -22,7 +22,7 @@ The app may replay already delivered FSEvents after a power loss, so inventory o
 
 ## Schema migration
 
-The current W6 branch schema is version 8; the installed app remains version 7. First launch prepares the local database and applies bundled migrations automatically; source-build users do not install a database server or run SQL setup scripts. The system SQLite library is linked through `CSQLite`.
+The current W6 branch and local installation use schema version 8 (installed acceptance on 2026-10-02). First launch prepares the local database and applies bundled migrations automatically; source-build users do not install a database server or run SQL setup scripts. The system SQLite library is linked through `CSQLite`.
 
 `schema_metadata` records every applied migration version and stable name. `PRAGMA user_version` must exactly match the latest contiguous metadata row before any migration runs. DailyDisk rejects:
 

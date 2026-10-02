@@ -534,12 +534,13 @@ Incremental attribution must join `hybrid_generations` and `hybrid_objects` dire
 - [ ] W3：实验 compact canonical 暂存或 inactive staging 一次构建，减少路径重复和提交复制；收益成立再新增迁移。
 - [ ] W4：排序表窄键布局和旧代删除写入分别实验，保留 raw-byte seek、FK、恢复窗口和原子激活。
 - [ ] W5：明确历史 ledger 保留/汇总与编码策略；不得未经授权淘汰旧明细。
-- [x] **W6 分支源码实现（用户 2026-10-02 决策）**：每日完整读取、差异持久化；一份当前库存 + 本轮变更暂存 + 短期旧值恢复，复用未变化对象/路径/排序/canonical。独立分支开发，不按实现成本后置。已接入生产 Store/coordinator；主线和已安装应用仍为 schema 7，分支为 schema 8。W1 细项、W3/W4 布局实验与实机验收独立追踪，W5 不作为前置条件。详细设计/验收见 Docs/WriteOptimizationReview.md。
+- [x] **W6 分支源码实现（用户 2026-10-02 决策）**：每日完整读取、差异持久化；一份当前库存 + 本轮变更暂存 + 短期旧值恢复，复用未变化对象/路径/排序/canonical。独立分支开发，不按实现成本后置。已接入生产 Store/coordinator；主线仍为 schema 7，分支与本机安装为 schema 8（2026-10-02 验收）。W1 细项、W3/W4 布局实验与实机验收独立追踪，W5 不作为前置条件。详细设计/验收见 Docs/WriteOptimizationReview.md。
 - [x] W6 源码约束：不得逐条写 last_seen、复制全代成员关系、长时间钉住 WAL 或用近似结构判删除；批量比较与精确访问标记必须有界。硬链接对象与路径分开处理，opaque 继承，E0/E1 和原子激活不弱化。早期删除旧库存授权不延伸到本次，迁移保留 schema 7 数据。
-- [ ] W6 发布验收：保持本地分支，安装前验证签名/GUI-helper 同步/新进度阶段与自然到期实机写入；扩展高变化目录改名/大量增删及真实 ENOSPC 故障矩阵。已有高变化元数据用例仍有 CPU 时间取舍，不能声称所有负载更快。
+- [x] W6 本机安装验收：稳定签名/三可执行文件同步、schema 7 → 8 保留数据、05:00 注册、GUI 重连与新进度阶段通过；用户授权的一次完整检查成功，helper 写入 1.290 GB / 520.64 s。详见文末与 Docs/Testing.md。
+- [ ] W6 后续发布验收：保持本地分支，等待自然到期任务验证跨日回收成本；扩展高变化目录改名/大量增删及真实 ENOSPC 故障矩阵。已有高变化元数据用例仍有 CPU 时间取舍，不能声称所有负载更快。
 - [x] 主线小改动：对象 NULL-safe no-op UPDATE 与相同排序映射 UPDATE 跳过，保留 membership/coverage/seal 语义；收益不外推全量扫描。
 
-184.64 MB 是两个提交前占用采样的差，缺少前一日逐表/空闲页/WAL 快照，不能归因成今天提交的约 6 万条 ledger。空间复用与累计写入是两个指标。原始审查阶段仅更新规划；随后主线 no-op 防护与本地 W6 实现见文末记录，安装仍未变化。
+184.64 MB 是两个提交前占用采样的差，缺少前一日逐表/空闲页/WAL 快照，不能归因成今天提交的约 6 万条 ledger。空间复用与累计写入是两个指标。原始审查阶段仅更新规划；随后主线 no-op 防护、本地 W6 实现及安装验收见文末记录。
 
 
 ### 当前优先级：每日默认全量与低写入设计（2026-10-01）
@@ -1052,7 +1053,7 @@ Installed acceptance update (2026-10-01): Computer Use access is now working. Re
 
 ### W6 full observation / delta persistence (schema 8, local branch)
 
-Current branch `feature/w6-delta-inventory` implements W6; main was pushed at `92509b6`, and the installed app remains schema 7. Migration 008 adds old-value recovery tables without copying or resetting existing inventory/reports. Subsequent daily full scans compare 1,024-record batches with 256-path prefetches against the current baseline plus run overlay; unchanged objects/paths/order/canonical are reused. Metadata-only changes stage/apply object values without path mutations or live canonical rewrites. Preserve hard-link observation order across batches. Exact sparse seen bits mark existing node IDs, never every row's last_seen; payload is capped at 64 MiB plus map overhead. Incomplete/failed comparisons cannot seal and must restart.
+Current branch `feature/w6-delta-inventory` implements W6; main was pushed at `92509b6`. The local installation was subsequently upgraded to schema 8; see the acceptance record below. Migration 008 adds old-value recovery tables without copying or resetting existing inventory/reports. Subsequent daily full scans compare 1,024-record batches with 256-path prefetches against the current baseline plus run overlay; unchanged objects/paths/order/canonical are reused. Metadata-only changes stage/apply object values without path mutations or live canonical rewrites. Preserve hard-link observation order across batches. Exact sparse seen bits mark existing node IDs, never every row's last_seen; payload is capped at 64 MiB plus map overhead. Incomplete/failed comparisons cannot seal and must restart.
 
 Deletion detection pages by generation/path ID and excludes opaque raw-byte subtrees. `comparingInventory` is a new cancellable Control phase, requiring GUI/helper upgrades together. E0–E1 compensation updates the same difference overlay. Full ordering auditing reads the base; canonical/ledger work is identity-bounded. Preserve the explicit mutation object index/range in canonicalOverlayPath: high-churn testing found target-prefix scans became quadratic.
 
@@ -1062,4 +1063,20 @@ Commit atomically stores changed old values, applies candidate mutations/canonic
 W6 source validation: default concurrent suite passed 295 tests in 7.716 s (five opt-in workloads disabled). Production 100k matched control measures 93.9% fewer process writes across zero-change + 3% cycles including cleanup; 100% metadata churn uses fewer writes but takes 19.68 s versus 11.79 s in the changed cycle. Million-row W6 completed in 121.096 s: unchanged 352 KB / 22.97 s, 3% changes 300.10 MB / 29.83 s. These are synthetic Debug process counters, not installed scan or NAND claims. Existing files do not immediately shrink on schema-8 migration; legacy retirement cleanup/free-page reuse/VACUUM policy still applies. Intermediate failures and fixture repairs are documented in Docs/Testing.md rather than counted as passes.
 
 
-Final W6 validation: original million-row full/incremental/opaque/retirement/VACUUM regression passed in 441.180 s after completing its previously unpublished incremental report fixture. All six prior count failures were caused by the intentional history pin; assertions and production retention stayed intact. Final build, format, LaunchAgent lint and whitespace checks pass. Main `92509b6` CI also passed; W6 is committed locally only and is not installed. Do not equate synthetic coverage with completed signed-app/natural-scan acceptance.
+Final W6 validation: original million-row full/incremental/opaque/retirement/VACUUM regression passed in 441.180 s after completing its previously unpublished incremental report fixture. All six prior count failures were caused by the intentional history pin; assertions and production retention stayed intact. Final build, format, LaunchAgent lint and whitespace checks pass. Main `92509b6` CI also passed. At this source-validation checkpoint W6 was local and uninstalled; the later signed installation is recorded below. Synthetic coverage alone is not signed-app/natural-scan acceptance.
+
+
+### W6 signed installation and real full-scan acceptance (2026-10-02)
+
+The user now explicitly authorizes preparing/installing W6 and one full scan to measure writes; this supersedes the previous source-only/no-install scope. No reset is authorized or required. Preserve schema-7 data and the previous signed app in a private, byte-verified rollback backup under stable/writer leases with an empty WAL. Compare all three designated requirements and update GUI/helper/CLI together at the original path. Re-register 05:00, verify migration preserved checkpoints/report history and grants, then use the advanced full action (ordinary same-day manual work may be incremental). Record final write/time metrics and the backup's one-time overhead separately; do not commit private runtime data.
+
+
+Installed Release source `c17b996` with the original persistent identity/path; all three designated requirements matched, deep strict signing and packaged helper dry-run passed. GUI/helper/CLI were replaced together. Schema 7 → 8 preserved checkpoints and ten reports before scanning; migration/due evaluation wrote 26.78 MB separately and skipped the already-completed daily check. FDA probes remained accessible (3/3), notifications allowed, and the registered job remains 05:00.
+
+The authorized advanced full check succeeded in 520.641 s (15:58:54–16:07:35 local), writing 1,290,424,320 B across the whole helper. Previous schema-7 natural run wrote 16,388,493,312 B in about 20 min 10 s: observed reduction 92.1%, with different churn/time intervals/cache states, not matched A/B or NAND evidence. GUI restart reattached to the same helper; comparingInventory and the final report displayed correctly with paths hidden. Coverage: 2,317,276 paths, 2,263,800 objects, 216 unreadable paths, zero transient errors. Helper exit 0, one successful domain, no failed domains.
+
+Active generation ID was reused and the checkpoint advanced. All ten previous DB report rows and 20 report files are unchanged; there are now eleven reports, no running run or remaining overlays, and one pre-existing retired generation. One W6 recovery version retains 46,939 old object and 31,217 old path records. DB allocation stayed 5,239,717,888 B; free pages declined by 66,371,584 B to 2,228,965,376 B. Strict installed CLI verification passed: integrity ok, schema 8, zero FK/inventory/report violations and zero abandoned runs. No forced compaction was requested; natural expired-generation cleanup still needs observation.
+
+The private rollback backup under the excluded application-support subtree has nominal allocation 5,257,883,648 B and accounts for most of the displayed DailyDisk overhead +5,269,975,040 B. This is a one-time upgrade backup, not a second W6 production inventory or live DB growth. APFS clone sharing means nominal allocation is not exclusive physical usage; do not interpret this report's overhead/unattributed split as steady state. Retain the matching old app/DB for rollback, and never commit the backup, real reports or identifying runtime dumps. W6 remains on the local branch and is not pushed.
+
+Final post-install source checks passed: `swift format lint --recursive Sources App Tests`, `swift build`, `Scripts/lint-launch-agent.sh`, and `git diff --check`. The default concurrent suite passed **295 tests in 5.772 s** (five opt-in workloads disabled). Production code was unchanged during installation; million-row workloads were not repeated.

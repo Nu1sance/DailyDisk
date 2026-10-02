@@ -6,7 +6,7 @@ DailyDisk is a GUI-first, source-built macOS disk-growth monitor. Click **立即
 
 This W6 development branch uses schema 8. Daily full checks still read all file metadata, but subsequent checks persist only changes to the current inventory, with old values retained for a short recovery window. Unchanged files do not receive daily `last_seen` updates or new generation membership. Initial baselines still require a complete build. See [the write review](Docs/WriteOptimizationReview.md) for measurements and limits.
 
-Migrations 007/008 preserve existing schema-6/7 inventory, checkpoints and historical reports; do not reset history for this update. The installed app remains schema 7 until separately upgraded. GUI/helper/CLI must be updated together because W6 adds a progress phase. The earlier legacy-to-schema-6 fresh-database transition does not apply.
+Migrations 007/008 preserve existing schema-6/7 inventory, checkpoints and historical reports; do not reset history for this update. The local installation was upgraded to schema 8 with history preserved on 2026-10-02; signed-app and one real full-scan acceptance are recorded in [Testing.md](Docs/Testing.md). GUI/helper/CLI must be updated together because W6 adds a progress phase. The earlier legacy-to-schema-6 fresh-database transition does not apply.
 
 ## What it monitors
 

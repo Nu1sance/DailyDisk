@@ -529,7 +529,7 @@ Intermediate failures and repairs are retained as evidence:
 - An early point-query W6 implementation took about 10–12 s for 100k subsequent cycles. Batched prefetch removed that overhead.
 - High-churn testing exposed a per-object target-prefix scan in canonicalOverlayPath; sampling and EXPLAIN confirmed the query plan. That slow test was terminated. Explicit existing-index identity bounds, object-only persistence and batched canonical reuse fixed the regression; the final high-churn run completed in 28.502 s across all three cycles and forced compaction. The opt-in workload now bounds sealing time to detect recurrence.
 
-Before installation, still run signed bundle/GUI/helper acceptance and observe the next naturally due real scan. Synthetic testing does not cover every actual APFS/FSEvents churn pattern or physical ENOSPC boundary. Do not repeat real full scans just to obtain a benchmark.
+At source-validation time, signed bundle/GUI/helper acceptance and a real scan remained pending; see the subsequent installed acceptance below. Synthetic testing does not cover every actual APFS/FSEvents churn pattern or physical ENOSPC boundary. Do not repeat real full scans just to obtain a benchmark.
 
 
 Final million-row W6 production run: all three cycles plus pruning, verification and forced compaction passed in **121.096 s**. Initial build: 1,966,112,768 B / 45.254 s; unchanged: 352,256 B / 22.975 s (+16,384 B cleanup); 3% changed: 300,101,632 B / 29.829 s (+1,773,568 B cleanup). Forced compaction separately wrote 1,105,477,632 B / 14.698 s; final allocated DB 368,472,064 B. Peak WAL 371,591,072 B, peak RSS 231,489,536 B. No matching final million-row full-generation control was run, so the 100k percentage is not extrapolated. Earlier million prototype/adapter numbers are superseded by this final production run for performance reporting.
@@ -538,4 +538,35 @@ Final million-row W6 production run: all three cycles plus pruning, verification
 Final default concurrent suite passed **295 tests in 7.716 s** (five opt-in workloads disabled). Format, LaunchAgent lint and whitespace checks passed. The original million-row combined regression initially finished in 461.258 s with six count assertions failing: its 32-removal incremental fixture never persisted a sample or report, so the new unpublished-history pin correctly retained the old generation. The fixture now publishes a validated incremental sample/report before testing expiry; no assertion or production recovery protection was relaxed. The corrected full rerun passed in **441.180 s**. Opaque preservation took 63.333 s, full diff 28.273 s; both retirement/compaction cycles left one generation and the expected path count. Post-VACUUM lookup/commit took 0.024/0.006 s; mixed incremental seal/derive/commit took 0.120/0.092/0.188 s. No production retention guard was weakened. Final `swift build`, formatting, LaunchAgent lint and whitespace checks passed.
 
 
-Pushed main commit `92509b6` also passed [GitHub Actions](https://github.com/Nu1sance/DailyDisk/actions/runs/36974155134). That CI run covers main, not the local W6 branch. W6 remains unpushed and uninstalled.
+Pushed main commit `92509b6` also passed [GitHub Actions](https://github.com/Nu1sance/DailyDisk/actions/runs/36974155134). That CI run covers main, not the local W6 branch. At that source-validation checkpoint W6 was unpushed and uninstalled; the later local installation is recorded below. W6 remains unpushed.
+
+
+## W6 signed local installation and real scan (2026-10-02)
+
+The user explicitly authorized installation and one full scan, superseding the earlier source-only / next-natural-run scope. Release source `c17b996` was packaged with the existing persistent signing identity and installed at the original path. All three designated requirements match the previous app; deep strict signature verification and the packaged dry-run helper passed. The task was removed while quiescent and re-registered through Settings at 05:00. FDA probes report three accessible protected locations and zero denials; notification permission remains allowed. Migration 008 preserved the existing checkpoint and all ten reports before scanning. The migration/due-evaluation helper exited without scanning and wrote 26,779,648 B separately from the scan below.
+
+The advanced full action ran once, from 15:58:54 to 16:07:35 local time (07:58:54–08:07:35 UTC). Report coverage is 2,317,276 paths / 2,263,800 objects with 216 unreadable paths and no transient errors; cumulative Control counters including replay are 2,317,300 / 2,263,824. Existing unreadable subtrees remain preserved. GUI quit/reopen reattached to the same helper, the new deletion-comparison phase displayed correctly, and Overview/History show the new report with paths hidden. History contains 11 reports; all ten pre-upgrade database report rows and their 20 JSON/Markdown files remain byte-identical. Helper exit status is 0, Control terminal state is succeeded, one domain completed and none failed.
+
+| Measurement | Result |
+| --- | ---: |
+| Whole-helper elapsed time | 520.641 s (8 min 41 s) |
+| Whole-helper process writes | 1,290,424,320 B (1.290 GB) |
+| Traversal phase writes | 612,941,824 B |
+| Deletion-comparison phase writes | 73,277,440 B |
+| Event catch-up phase writes | 87,236,608 B |
+| Atomic commit phase writes | 504,070,144 B |
+| Sampled peak RSS / footprint | 156,811,264 / 164,217,552 B |
+| Sampled peak WAL | 33,240,192 B |
+| SQLite file before / after | 5,239,717,888 / 5,239,717,888 B |
+| Reusable free pages before / after | 2,295,336,960 / 2,228,965,376 B |
+
+Process writes use the existing helperStarted/helperFinished Darwin counters; phase values are boundary differences, not a decomposition of SQLite page writes. Memory/WAL peaks are external ten-second samples and may miss brief peaks. This measurement includes report publication and the retention evaluation, but no expired legacy-generation deletion or VACUUM occurred. There remains one active generation and one pre-existing retired generation. The active generation ID is unchanged, the trusted checkpoint advanced, overlays/targets are empty, and one recovery version retains 46,939 object and 31,217 path old-value records. Internal free-page consumption is 66,371,584 B; allocated DB size did not increase.
+
+The preceding naturally due schema-7 run (05:00:05–05:20:15 local time) wrote 16,388,493,312 B. Observed writes fell 92.1%, and elapsed time fell from about 20 min 10 s to 8 min 41 s. These runs cover different time intervals/churn and cache states; this is an installed observation, not a matched A/B guarantee or an SSD NAND-wear measurement. Subsequent natural runs must still validate expired legacy cleanup and recurring retention costs. No second real scan was launched for benchmarking.
+
+Rollback backup: a byte-verified, lease-protected APFS clone of the schema-7 DB plus the previous signed app and report/control files is retained privately below the excluded application-support backup subtree. Nominal backup allocation is 5,257,883,648 B. It accounts for most of this report's **DailyDisk overhead +5,269,975,040 B**; the live DB did not grow. APFS shared clone blocks mean nominal allocated bytes are not exclusive physical usage, so the overhead/unattributed split is affected by this one-time backup. Do not present that report as steady-state W6 capacity behavior. No real DB, report, identifying path dump or signing identity is committed. Rollback must restore the matching old app and old DB together while quiescent.
+
+
+Post-scan installed strict CLI verification passed: `healthy: true`, schema/expected schema 8, integrity `ok`, zero foreign-key, inventory-invariant and report-payload violations, zero abandoned runs, no active writer. This was a read-only validation, not another scan.
+
+Final post-install source checks passed: `swift format lint --recursive Sources App Tests`, `swift build`, `Scripts/lint-launch-agent.sh`, and `git diff --check`. The default concurrent suite passed **295 tests in 5.772 s** (five opt-in workloads disabled). Production code was unchanged during installation; million-row workloads were not repeated.

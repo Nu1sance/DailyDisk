@@ -108,7 +108,7 @@ Keep the same identity, default bundle identifier, and `~/Applications/DailyDisk
 
 Neither compilation nor a signature grants Full Disk Access automatically. The developer's permissions do not transfer through GitHub. DailyDisk uses a user LaunchAgent; no root helper or `sudo` is needed for normal build/install/use into `~/Applications`.
 
-Current source uses daily full scanning at **05:00 local time**, with incremental attempts only for subsequent manual requests after a published full scan that day. Upgrade the embedded plist, GUI/helper and registered schedule together while preserving signing identity and history. Schema 6 upgrades to 7 without resetting inventory. Verify the registered schedule after updating; an old installation can retain its 09:00 job. See [validation status](DailyFullScan.md). The app need not stay open. A powered-off/logged-out Mac cannot execute its user task; catch-up depends on the next eligible login/wake invocation, not a wake/power-on feature.
+Current source uses daily full scanning at **05:00 local time**, with incremental attempts only for subsequent manual requests after a published full scan that day. Upgrade the embedded plist, GUI/helper and registered schedule together while preserving signing identity and history. Schema 6/7 upgrades to W6 schema 8 without resetting inventory. Migration 008 adds old-value recovery metadata and preserves existing reports/checkpoints. Verify the registered schedule after updating; an old installation can retain its 09:00 job. See [validation status](DailyFullScan.md). The app need not stay open. A powered-off/logged-out Mac cannot execute its user task; catch-up depends on the next eligible login/wake invocation, not a wake/power-on feature.
 
 ## 5. Update or troubleshoot
 
@@ -130,10 +130,22 @@ The repository currently contains CI build/test workflows, not a notarization, r
 - [Apple: Create self-signed certificates in Keychain Access](https://support.apple.com/guide/keychain-access/create-self-signed-certificates-kyca8916/mac)
 - [Apple: Code Signing Tasks](https://developer.apple.com/library/archive/documentation/Security/Conceptual/CodeSigningGuide/Procedures/Procedures.html)
 
-## Internal-beta schema 6 update
+## Historical internal-beta schema 6 update
 
-Current source builds use the compact hybrid inventory and require a fresh baseline for this internal-beta transition. Explicitly remove/reset old history before replacing the application; no conversion or special compatibility UI is supplied. Keep the signing identity, bundle ID and install path unchanged, update GUI/helper together, and quit/reopen the GUI. The first full scan establishes an opening balance; growth comparisons begin with the next successful scan.
+The earlier legacy-to-schema-6 transition required a fresh baseline and explicitly authorized removal of old history. That historical reset instruction does not apply to schema 7 → 8 (W6); keep existing data. Keep the signing identity, bundle ID and install path unchanged, update GUI/helper together, and quit/reopen the GUI. The first full scan establishes an opening balance; growth comparisons begin with the next successful scan.
 
 ### Installed transition update (2026-09-29)
 
 The user authorized deletion of old inventory and installation with a fresh baseline. The dedicated `InventoryFormatError`, `baselineResetRequired` Control category, GUI message and manual/scheduled compatibility branches have been removed. Earlier reset-prompt descriptions are historical. No conversion or old-checkpoint reuse is implemented. The migration retains only its generic empty-database consistency precondition to prevent destructive table replacement beneath an existing checkpoint.
+
+
+## W6 local upgrade procedure
+
+The user authorized a signed local W6 update and one complete scan on 2026-10-02. Pause the registered task and quit the GUI while the helper is idle. Hold the stable reset and writer leases; require an empty WAL before making a byte-verified database backup. Retain the previous signed app for rollback. Build and verify all three executables with the original persistent identity, compare designated requirements, run the packaged helper with DAILYDISK_DRY_RUN=1, then install at the original path and restore the 05:00 registration.
+
+The registered helper applies migration 008 before due evaluation. Verify schema 8, unchanged checkpoints/report history and preserved privacy grants before requesting the explicit advanced full check; ordinary same-day Check Now may choose incremental. A schema-8 database cannot be opened by the previous schema-7 binary; rollback requires the pre-upgrade database and app together while quiescent. Do not delete inventory to upgrade W6.
+
+A private APFS-cloned rollback database avoids rewriting the whole database. If retained under DailyDisk's excluded Application Support subtree, its file allocation is included in DailyDisk-overhead sampling even though APFS may share its physical blocks. Keep this one-time backup effect separate from database growth and from helper-process write measurements. Backup artifacts and manifests must never enter the repository.
+
+
+Local acceptance completed on 2026-10-02: the original signing requirements and privacy grants were preserved, schema 8 retained all ten previous reports, the 05:00 task was restored, and the explicitly requested full check published report eleven. The rollback backup remains private. See [Testing.md](Testing.md) for scan measurements and verification; the W6 branch is still local and unpushed.
