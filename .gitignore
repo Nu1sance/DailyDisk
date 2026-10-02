@@ -64,3 +64,8 @@ Reports/
 *.log
 *.jsonl
 *.ips
+
+# Local planning, investigation records and acceptance evidence
+.local-notes/
+__pycache__/
+*.pyc

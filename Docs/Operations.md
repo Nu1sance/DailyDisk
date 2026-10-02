@@ -24,7 +24,7 @@ Source schedule: **05:00 local time**, `RunAtLoad = true`, with a published-full
 - Recover committed-but-unpublished reports before selecting new work; attach to an active helper rather than duplicate it.
 - Use calendar dates, with tests for midnight, DST and time-zone changes, not a rolling 24-hour full-scan deadline.
 
-The old 168-hour reconciliation policy is no longer used for default selection. Daily full scans establish current-journal E0–E1 boundaries instead of replaying old history; incremental checks still require trusted committed history. See [the implementation sequence](DailyFullScan.md#implementation-order).
+The old 168-hour reconciliation policy is no longer used for default selection. Daily full scans establish current-journal E0–E1 boundaries instead of replaying old history; incremental checks still require trusted committed history. See [the daily-full design](DailyFullScan.md).
 The task runs in the logged-in user's domain. It is not a power-on/wake scheduler and cannot run while the Mac is shut down or the user is logged out. GUI closure alone does not stop it. Timings observed locally range from 17 seconds for a small incremental check to about 2 minutes 50 seconds for overnight changes; the initial 2.36-million-path baseline took about 23–24 minutes. These are not service-level guarantees.
 
 ## GUI-first manual operation
@@ -186,17 +186,13 @@ Open **设置 → 诊断 → 数据占用**. **刷新占用** reads allocated ma
 
 Temporary free disk space is required (conservative check: twice the database logical size plus 1 GB). If insufficient, compaction is declined with an explicit message. Do not manually delete the SQLite/WAL files to free space. If a scan or report needs recovery, first run a normal check, then retry maintenance. Cleanup/compaction/verification can take minutes and cannot be cancelled after their boundary; the window can be closed and reopened safely. After a helper crash, the next invocation validates SQLite recovery; a manual maintenance request reports interruption rather than automatically repeating VACUUM.
 
-Automatic compaction is limited by the 1 GB / 25% / seven-day thresholds. This does not make the helper resident. Daily full scanning needs temporary staging/WAL space and can reuse free pages; frequent compaction can force that space to be allocated and written again. Prefer measured free-page reuse rather than daily compression. “本轮自身增长” and “当前数据占用” refer to different times; maintenance never rewrites past accounting. Schema 6 already shares parent/name nodes; further ledger-retention or unchanged-record reuse changes require separate measurements and validation.
+Automatic compaction is limited by the 1 GB / 25% / seven-day thresholds. This does not make the helper resident. Daily full scanning needs temporary staging/WAL space and can reuse free pages; frequent compaction can force that space to be allocated and written again. Prefer measured free-page reuse rather than daily compression. “本轮自身增长” and “当前数据占用” refer to different times; maintenance never rewrites past accounting. Schema 6 already shares parent/name nodes; W6 reuses unchanged records; further ledger-retention changes require separate measurements and validation.
 
 Upgrade the GUI and helper together and restart the GUI. Schema 5 is not readable by an older writer; keep the signing identity, bundle ID and installed path stable. This source change does not itself migrate or compact an installed user's database.
 
-## Switching to schema 6 during internal testing
+## Historical schema 6 transition
 
-Use a fresh database when switching this internal-beta installation to schema 6. Old history and checkpoints are discarded explicitly during installation, not converted. Update the GUI/helper together and restart the GUI. The first new report is an opening balance; the next successful report begins growth comparisons.
-
-### Installed transition update (2026-09-29)
-
-The user authorized deletion of old inventory and installation with a fresh baseline. The dedicated `InventoryFormatError`, `baselineResetRequired` Control category, GUI message and manual/scheduled compatibility branches have been removed. Earlier reset-prompt descriptions are historical. No conversion or old-checkpoint reuse is implemented. The migration retains only its generic empty-database consistency precondition to prevent destructive table replacement beneath an existing checkpoint.
+The legacy-to-schema-6 beta transition required a fresh database with explicitly authorized history deletion. This does not apply to schema 7/8 upgrades; preserve existing history and checkpoints. Update the GUI/helper together and restart the GUI. The first new report is an opening balance; the next successful report begins growth comparisons.
 
 ### Missing helper after reinstall
 
@@ -218,14 +214,6 @@ The pending diagnostic queue holds at most 512 records; critical reasons prefere
 
 The probes are instrumentation, not a fix for journal UUID changes or missing cursors. After deployment, observe same-day checks and naturally occurring cross-day/reboot/sleep transitions before assigning a root cause. Do not interrupt an active scan to install this update or relax journal, cursor, hard-link or event-loss protections to obtain incremental success.
 
-## Temporary cross-volume journal observation
-
-For a developer investigation on macOS with Python 3 available, run `python3 Scripts/observe-event-journal.py --hours 24 --include-external-data`. This optional tool is separate from the installed app and requires no new production dependency. It samples internal Data, the mounted System snapshot, and optionally the fixed `/Volumes/Data` mount every 60 seconds; output is private under `~/Library/Logs/DailyDisk-journal-*/`, capped at 2 MiB. It exits on deadline, capacity or SIGTERM and never writes inventory/checkpoints or prevents sleep. Inspect `observer.pid` and verify the process command before signalling it. Sleep creates explicit time gaps; expiry is enforced when execution resumes. It observes the mounted System snapshot, not an unmounted underlying System volume.
-
-Use `PYTHONDONTWRITEBYTECODE=1 python3 Scripts/test-observe-event-journal.py` for synthetic checks. UUID changes identify a changed event stream, not its upstream cause. Compare with system logs and retain raw identities only in private local evidence.
-
-For finite live system evidence, `python3 Scripts/record-journal-system-log.py --seconds 3600` streams narrowly selected journal/update/mount messages without changing logging configuration. Private `system.0.jsonl` is newest, rotating through `system.9.jsonl`; total content is capped at 20 MiB. The stream may contain a non-JSON startup line, system loss notices and private redactions. Preserve an incident window before rotation removes it. `result.json` records stop reason and oversized-line drops; SIGTERM stops its child stream too. This is a diagnostic recorder, not a guarantee of complete causal evidence. Test with `PYTHONDONTWRITEBYTECODE=1 python3 Scripts/test-record-journal-system-log.py`.
-
 Mailbox trust loss now aborts replay cooperatively before consuming further queued history, including when live events overflow during historical consumption. Existing mutation/subtree progress checkpoints also check replay trust; a currently executing native or database operation must return first. The stream is stopped and the uncommitted attempt cleaned up before recovery. No early trusted fence or checkpoint is published. This reduces wasted work after fatal loss, but does not prevent overflow or journal replacement. Recursive subtree repair requests alone do not trigger this abort.
 
 ## Daily-full write telemetry
@@ -235,4 +223,4 @@ Private ScanProbes records include optional `processWriteBytes` on helper start/
 Schema 7 preserves schema-6 inventory and historical reports. The old schema-6 reset instructions above describe the earlier beta transition and must not be repeated for this upgrade.
 
 
-W6 source adds the cancellable **正在核对已删除的文件** phase after traversal. Its exact seen bitmap is memory-only, so a stopped run restarts comparison after normal abandoned-overlay cleanup; it never resumes deletion inference from incomplete coverage. Successful daily checks normally retain one current inventory plus 24-hour changed old values. Initial/legacy recovery generations may still coexist temporarily. Rebuild GUI/helper/CLI together before installing. The local installation was upgraded to schema 8 on 2026-10-02 with history preserved and one explicit full scan completed; see Testing.md. The branch remains local and unpushed.
+W6 source adds the cancellable **正在核对已删除的文件** phase after traversal. Its exact seen bitmap is memory-only, so a stopped run restarts comparison after normal abandoned-overlay cleanup; it never resumes deletion inference from incomplete coverage. Successful daily checks normally retain one current inventory plus 24-hour changed old values. Initial/legacy recovery generations may still coexist temporarily. Rebuild GUI/helper/CLI together before installing. See Testing.md for regression gates.

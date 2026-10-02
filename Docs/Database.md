@@ -22,7 +22,7 @@ The app may replay already delivered FSEvents after a power loss, so inventory o
 
 ## Schema migration
 
-The current W6 branch and local installation use schema version 8 (installed acceptance on 2026-10-02). First launch prepares the local database and applies bundled migrations automatically; source-build users do not install a database server or run SQL setup scripts. The system SQLite library is linked through `CSQLite`.
+The current implementation uses schema version 8. First launch prepares the local database and applies bundled migrations automatically; source-build users do not install a database server or run SQL setup scripts. The system SQLite library is linked through `CSQLite`.
 
 `schema_metadata` records every applied migration version and stable name. `PRAGMA user_version` must exactly match the latest contiguous metadata row before any migration runs. DailyDisk rejects:
 
@@ -175,7 +175,7 @@ Explicit auditTreeOrder diagnostics page members in batches of 512 and reconstru
 
 Opaque-copy experiments reduce roots to disjoint raw-byte subtrees and copy at most 1,024 records per transaction. The empty relative path denotes the whole volume. An injected interruption leaves partial staging batches, preserving the active checkpoint; later staging deletion and node GC preserve the baseline. The diff helper merges two independent 512-row cursors and emits changed record pairs without collecting an inventory-sized result. These helpers validate storage access patterns, not filesystem permission discovery or production cancellation delivery.
 
-## Production hybrid inventory (schema 6, 2026-09-29)
+## Production hybrid inventory (schema 6)
 
 Migration 006 replaces the three physical inventory tables with `hybrid_objects`, `hybrid_paths`, `hybrid_canonical`, immutable `hybrid_nodes`, and `hybrid_order`. Integer volume/generation mappings retain external UUIDs. The old inventory names are read-only views, preserving raw BLOB path and identity semantics for accounting, overlays, reports and inspection. Production writes use reused prepared statements directly against compact tables. The generation-local ordering table preserves bounded raw-path seeks without reconstructing the complete tree for each page.
 
@@ -183,21 +183,16 @@ Full generation sealing validates ordering completeness and exact node/path equi
 
 This internal-beta release uses a fresh baseline and has no old-inventory conversion or compatibility UI. Empty databases initialize normally. A generic migration precondition prevents destructive inventory replacement beneath old generations/checkpoints. Published migrations 001–005 remain unchanged; an empty new inventory must never inherit an old checkpoint.
 
-The transactional scan, revision seal, ledger, report recovery and checkpoint protocols remain in place. This reduces persistent inventory duplication; WAL, staging generations, overlays, retained recovery generations and native VACUUM still need temporary disk space. See Testing for measured production-chain costs, not a guaranteed real-disk scan duration.
+The transactional scan, revision seal, ledger, report recovery and checkpoint protocols remain in place. This reduces persistent inventory duplication; WAL, staging generations, overlays, retained recovery generations and native VACUUM still need temporary disk space. See Testing.md for reproducible production-chain workloads.
 
-### Installed transition update (2026-09-29)
+## Daily-full write management
 
-The user authorized deletion of old inventory and installation with a fresh baseline. The dedicated `InventoryFormatError`, `baselineResetRequired` Control category, GUI message and manual/scheduled compatibility branches have been removed. Earlier reset-prompt descriptions are historical. No conversion or old-checkpoint reuse is implemented. The migration retains only its generic empty-database consistency precondition to prevent destructive table replacement beneath an existing checkpoint.
+Daily full scanning compares baseline canonical objects with the sealed authoritative view (W6 difference overlay or initial/legacy staging), without duplicating an expected-active event inventory. Commit rederives the snapshot ledger and atomically activates inventory with its trusted E1 checkpoint. Migration 007 adds `daily_reports.snapshot_compared_delta` (old rows default to zero) and `published_at`, plus `scan_runs.inventory_completed_at`. Completion is recorded only after inventory COMMIT; if this follow-up marker cannot be written, a published report alone does not satisfy daily work. New publication times are recorded after artifacts are written; retries retain the original persisted timestamp. Historical rows use `generated_at` because the original publication time was not recorded. This upgrade preserves schema-6 inventory and old report payloads.
 
-
-## Planned daily-full write management
-
-Daily full scanning compares baseline canonical objects directly with sealed staging, without duplicating an expected-active event overlay. Commit rederives the snapshot ledger and atomically activates inventory with its trusted E1 checkpoint. Migration 007 adds `daily_reports.snapshot_compared_delta` (old rows default to zero) and `published_at`, plus `scan_runs.inventory_completed_at`. Completion is recorded only after inventory COMMIT; if this follow-up marker cannot be written, a published report alone does not satisfy daily work. New publication times are recorded after artifacts are written; retries retain the original persisted timestamp. Historical rows use `generated_at` because the original publication time was not recorded. This upgrade preserves schema-6 inventory and old report payloads.
-
-SQLite WAL experiments and adopted limits are recorded in [DailyFullScan.md](DailyFullScan.md). FULL durability, writer leases, crash recovery and strict CLI refusal of nonempty WAL remain mandatory. A single atomic transaction can exceed an inter-transaction WAL threshold; do not describe that threshold as a hard cap on transaction size. The 24-hour retired recovery window and seven-day automatic compaction cooldown remain unchanged. No daily unconditional VACUUM is introduced.
+SQLite WAL policy and measurement limits are documented in [DailyFullScan.md](DailyFullScan.md). FULL durability, writer leases, crash recovery and strict CLI refusal of nonempty WAL remain mandatory. A single atomic transaction can exceed an inter-transaction WAL threshold; do not describe that threshold as a hard cap on transaction size. The 24-hour retired recovery window and seven-day automatic compaction cooldown remain unchanged. No daily unconditional VACUUM is introduced.
 
 
-## Daily inventory reuse (schema 8, W6 branch)
+## Daily inventory reuse (schema 8, W6)
 
 Migration 008 only adds `inventory_reuse_history`, `inventory_reuse_old_objects` and `inventory_reuse_old_paths`; it does not convert, copy or delete schema-7 inventory or reports. The compact current tables and raw-byte ordering stay in place. The initial baseline and legacy full/recovery generation path remain supported.
 

@@ -4,9 +4,9 @@ DailyDisk is a GUI-first, source-built macOS disk-growth monitor. Click **立即
 
 ## Internal-beta storage transition
 
-This W6 development branch uses schema 8. Daily full checks still read all file metadata, but subsequent checks persist only changes to the current inventory, with old values retained for a short recovery window. Unchanged files do not receive daily `last_seen` updates or new generation membership. Initial baselines still require a complete build. See [the write review](Docs/WriteOptimizationReview.md) for measurements and limits.
+The current implementation uses W6 with schema 8. Daily full checks still read all file metadata, but subsequent checks persist only changes to the current inventory, with old values retained for a short recovery window. Unchanged files do not receive daily `last_seen` updates or new generation membership. Initial baselines still require a complete build. See [the daily-full design](Docs/DailyFullScan.md) for persistence and measurement limits.
 
-Migrations 007/008 preserve existing schema-6/7 inventory, checkpoints and historical reports; do not reset history for this update. The local installation was upgraded to schema 8 with history preserved on 2026-10-02; signed-app and one real full-scan acceptance are recorded in [Testing.md](Docs/Testing.md). GUI/helper/CLI must be updated together because W6 adds a progress phase. The earlier legacy-to-schema-6 fresh-database transition does not apply.
+Migrations 007/008 preserve existing schema-6/7 inventory, checkpoints and historical reports; do not reset history for this update. GUI/helper/CLI must be updated together because W6 adds a progress phase. The earlier legacy-to-schema-6 fresh-database transition does not apply.
 
 ## What it monitors
 
@@ -71,19 +71,13 @@ The overview presents the latest disk delta and more specific growth sources fro
 
 The source implements **one automatic full scan per local day at 05:00**. If a successful full scan already completed that day, automatic work is skipped. A manual **立即检查** performs full scanning when today's full scan is missing; subsequent manual requests try incremental scanning and fall back to full if trusted event history is unavailable. An in-progress scan is reused. Failed/cancelled work does not count as successful completion. Explicit full rechecks remain available.
 
-The [design and validation record](Docs/DailyFullScan.md) separates source tests from installed acceptance. Update the GUI, helper and registered LaunchAgent together; an older installed copy retains its previous schedule. No history reset is needed. Daily success uses the full inventory’s actual post-commit completion date and requires a published report. Delayed publication cannot turn yesterday’s inventory into today’s full check. Historical schema-6 completion times are approximated from their stored finish times.
+The [daily-full design](Docs/DailyFullScan.md) separates source tests from installed acceptance. Update the GUI, helper and registered LaunchAgent together; an older installed copy retains its previous schedule. No history reset is needed. Daily success uses the full inventory’s actual post-commit completion date and requires a published report. Delayed publication cannot turn yesterday’s inventory into today’s full check. Historical schema-6 completion times are approximated from their stored finish times.
 
 The first full scan remains an opening balance. The daily full path compares successive inventories and uses FSEvents only to catch changes during traversal; it must not depend on yesterday's journal surviving. The helper exits after work. A powered-off/logged-out Mac cannot execute its user task; catch-up depends on an eligible login/wake invocation, not a guaranteed wake-up feature.
 
-## Observed performance
+## Performance and storage
 
-Recent full recovery runs on this Mac completed in 20 minutes 19 seconds (2026-09-30) and 22 minutes 37 seconds (2026-10-01), including report publication and cleanup. Full scanning reads metadata, but inventory/WAL/maintenance writes are substantial; final database size is not cumulative writes or SSD wear. See the [measured synthetic write budget and its limits](Docs/DailyFullScan.md#first-measured-baseline-2026-10-01).
-
-Local observations on one Mac (2026-09-23): roughly 2.36 million paths took about 23–24 minutes for the initial baseline; a small incremental run took 17 seconds; the next morning's scan and report publication took about 2 minutes 50 seconds. These are measurements, not guarantees. File count, change volume, permissions, storage speed, and other disk activity affect duration. Runtime data for a multi-million-file inventory can occupy several GB; DailyDisk accounts for its own overhead separately.
-
-The subsequent notification-only crash was repaired: scheduled notifications now use the signed app's short-lived windowless delivery mode, isolated from the scan writer. Denied notifications, timeouts, or a notification process crash do not invalidate the saved report or block normal task completion. Notifications are threshold/cooldown driven, not an unconditional message after every scan.
-
-Baseline creation, exact 128 MiB creation/removal accounting, progress/cancel/reconnect, notification delivery and database integrity were verified locally. The history-page **visual acceptance remains incomplete** because the UI automation connection closed on that page; this is not claimed as a passed check. See [validation evidence and remaining gates](Docs/Testing.md).
+Scan duration depends on file count, change volume, permissions, storage speed and concurrent activity. Full scanning reads metadata; W6 reduces inventory writes by persisting changes. Runtime data for a multi-million-file inventory can occupy several GB, with free pages reused between scans. Database size is not cumulative writes or SSD wear. See [the design](Docs/DailyFullScan.md) and [reproducible tests](Docs/Testing.md).
 
 ## Reports
 

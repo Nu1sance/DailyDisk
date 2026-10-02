@@ -56,7 +56,7 @@ External system commands are invoked by absolute path without a shell. `SystemPr
 
 ## Daily-full refactor boundaries
 
-The daily-full path starts from a trusted current-journal E0, traverses all metadata, applies E0–E1 changes and compares the final logical inventory with previous committed inventory. It neither replays yesterday’s history nor builds/seals an event-maintained expected inventory. On the W6 branch, an existing baseline is reused through a run-scoped active overlay containing scan differences; it is not an event-maintained copy of yesterday’s history. Opaque rows are inherited. Initial/legacy generation builds retain the bounded opaque-copy pager. Final topology/device/journal identity is rechecked before activation. Legacy scheduled reconciliation and incremental-recovery diagnostics retain their old path for compatibility; they are not the default daily policy.
+The daily-full path starts from a trusted current-journal E0, traverses all metadata, applies E0–E1 changes and compares the final logical inventory with previous committed inventory. It neither replays yesterday’s history nor builds/seals an event-maintained expected inventory. With W6, an existing baseline is reused through a run-scoped active overlay containing scan differences; it is not an event-maintained copy of yesterday’s history. Opaque rows are inherited. Initial/legacy generation builds retain the bounded opaque-copy pager. Final topology/device/journal identity is rechecked before activation. Legacy scheduled reconciliation and incremental-recovery diagnostics retain their old path for compatibility; they are not the default daily policy.
 
 ## Full inventory scanning
 
