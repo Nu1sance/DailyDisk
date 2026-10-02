@@ -422,7 +422,7 @@ final class AppController: ObservableObject {
             actionMessage =
                 launchAgentStatus == .requiresApproval
                 ? "请在“登录项与扩展”中允许 DailyDisk。"
-                : "已启用每天 09:00 自动检查。"
+                : "已启用每天 05:00 自动检查。"
             scanState = .idle
             await refresh()
             if launchAgentStatus == .enabled, !scanState.isActive {

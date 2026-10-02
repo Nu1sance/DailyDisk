@@ -108,7 +108,7 @@ Keep the same identity, default bundle identifier, and `~/Applications/DailyDisk
 
 Neither compilation nor a signature grants Full Disk Access automatically. The developer's permissions do not transfer through GitHub. DailyDisk uses a user LaunchAgent; no root helper or `sudo` is needed for normal build/install/use into `~/Applications`.
 
-Daily work is scheduled for 09:00 local time, usually incrementally. A rolling seven-day deadline or event-history recovery triggers a full scan. The app need not stay open. A powered-off/logged-out Mac cannot run this user task at 09:00; login/wake and the due gate determine catch-up, not a wake/power-on feature provided by DailyDisk.
+Current source uses daily full scanning at **05:00 local time**, with incremental attempts only for subsequent manual requests after a published full scan that day. Upgrade the embedded plist, GUI/helper and registered schedule together while preserving signing identity and history. Schema 6 upgrades to 7 without resetting inventory. Verify the registered schedule after updating; an old installation can retain its 09:00 job. See [validation status](DailyFullScan.md). The app need not stay open. A powered-off/logged-out Mac cannot execute its user task; catch-up depends on the next eligible login/wake invocation, not a wake/power-on feature.
 
 ## 5. Update or troubleshoot
 

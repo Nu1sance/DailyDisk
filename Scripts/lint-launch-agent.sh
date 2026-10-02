@@ -6,3 +6,5 @@ plutil -lint "$PLIST"
 /usr/libexec/PlistBuddy -c 'Print :Label' "$PLIST" | grep -Fx 'io.github.xiuyuwu.DailyDisk.agent'
 /usr/libexec/PlistBuddy -c 'Print :BundleProgram' "$PLIST" | grep -Fx 'Contents/Helpers/DailyDiskAgent'
 /usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$PLIST" | grep -Fx 'DailyDiskAgent'
+/usr/libexec/PlistBuddy -c 'Print :StartCalendarInterval:Hour' "$PLIST" | grep -Fx '5'
+/usr/libexec/PlistBuddy -c 'Print :StartCalendarInterval:Minute' "$PLIST" | grep -Fx '0'

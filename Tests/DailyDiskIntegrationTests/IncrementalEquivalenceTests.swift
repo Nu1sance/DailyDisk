@@ -75,6 +75,7 @@ private actor FakeEventSession: EventHistorySession {
 
 private actor QueuedEventReader: EventHistoryReading {
     private var sessions: [FakeEventSession]
+    private(set) var openedCheckpoints: [EventStreamCheckpoint?] = []
 
     init(_ sessions: [FakeEventSession]) {
         self.sessions = sessions
@@ -84,6 +85,7 @@ private actor QueuedEventReader: EventHistoryReading {
         volume: MonitoredVolume,
         checkpoint: EventStreamCheckpoint?
     ) async throws -> any EventHistorySession {
+        openedCheckpoints.append(checkpoint)
         guard !sessions.isEmpty else { throw IncrementalScanError.missingCheckpoint }
         return sessions.removeFirst()
     }
@@ -198,7 +200,7 @@ private struct IncrementalFixture {
     let baselineCheckpoint: Checkpoint
     let baselineSample: StorageSample
 
-    static func make() async throws -> IncrementalFixture {
+    static func make(storeClock: any Clock = SystemClock()) async throws -> IncrementalFixture {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("DailyDiskIncremental", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -235,7 +237,8 @@ private struct IncrementalFixture {
         )
         let scope = try StorageDomainScope(domain: domain, volumes: [volume])
         let store = try SQLiteInventoryStore(
-            databaseURL: databaseRoot.appendingPathComponent("DailyDisk.sqlite")
+            databaseURL: databaseRoot.appendingPathComponent("DailyDisk.sqlite"),
+            checkpointPolicy: .bounded(), clock: storeClock
         )
         try await store.prepare()
         try await store.register(scope: scope)
@@ -1202,8 +1205,8 @@ private struct UnavailableContentScanner: FileInventoryScanning {
     }
 }
 
-@Test("Unavailable provider content preserves the baseline rather than reporting deletions")
-func unavailableContentPreservesFullScanBaseline() async throws {
+@Test("Unavailable provider content preserves the baseline rather than reporting deletions", arguments: [false, true])
+func unavailableContentPreservesFullScanBaseline(daily: Bool) async throws {
     let fixture = try await IncrementalFixture.make()
     defer { fixture.remove() }
     let session = FakeEventSession(
@@ -1227,8 +1230,10 @@ func unavailableContentPreservesFullScanBaseline() async throws {
                 domains: [fixture.scope.domain], volumes: [fixture.volume],
                 discoveredAt: Date(timeIntervalSince1970: 20))),
         clock: AdvancingClock(Date(timeIntervalSince1970: 20)))
-    let outcome = try await coordinator.run(volume: fixture.volume, scope: fixture.scope, mode: .scheduled)
+    let outcome = try await coordinator.run(
+        volume: fixture.volume, scope: fixture.scope, mode: daily ? .daily : .scheduled)
     #expect(outcome.reconciliation.reconciliationChanges.isEmpty)
+    #expect(outcome.reconciliation.snapshotChanges.isEmpty)
     #expect(outcome.scanErrors.contains { $0.kind == .contentUnavailable })
     let inspection = ScanRun(
         kind: .incremental, reason: .manual, status: .running,
@@ -1328,4 +1333,410 @@ func inodeReuseRequiresNoSurvivingAliases() async throws {
         #expect(current.count == (oldName == "a" ? 0 : 1))
         try await fixture.store.interrupt(runID: run.id, finishedAt: Date())
     }
+}
+
+@Test("Daily full replays E0-E1 races into staging and attributes them once")
+func dailyFullReplaysLiveRace() async throws {
+    let fixture = try await IncrementalFixture.make()
+    defer { fixture.remove() }
+    let livePath = try RelativePath(validating: "live-created")
+    let liveEvent = FileSystemEvent(
+        id: 11,
+        volumeID: fixture.volume.id,
+        path: livePath,
+        flags: [.created, .isFile]
+    )
+    let session = FakeEventSession(
+        historical: [],
+        live: [try EventBatch(events: [liveEvent])],
+        historyFence: EventCursorFence(
+            volumeID: fixture.volume.id,
+            eventStoreUUID: fixture.eventStoreUUID,
+            highestFullyDeliveredEventID: 10,
+            phase: .historyDone,
+            trust: .trusted
+        ),
+        liveFence: EventCursorFence(
+            volumeID: fixture.volume.id,
+            eventStoreUUID: fixture.eventStoreUUID,
+            highestFullyDeliveredEventID: 11,
+            phase: .liveFlush,
+            trust: .trusted
+        )
+    )
+    let baseScanner = FileInventoryScanner(
+        configuration: try FileInventoryScannerConfiguration(
+            managedAbsolutePaths: [],
+            validateMountIdentity: false
+        )
+    )
+    let racingScanner = RacingFileScanner(base: baseScanner) {
+        #expect(await session.stopCount == 1)
+        try Data("created after traversal".utf8).write(
+            to: fixture.root.appendingPathComponent("live-created")
+        )
+    }
+    let sample = try StorageSample(
+        storageDomainID: fixture.scope.domain.id,
+        sampledAt: Date(timeIntervalSince1970: 20),
+        capacityBytes: 1_000_000,
+        usedBytes: 100_100,
+        availableBytes: 899_900
+    )
+    let coordinator = FullScanCoordinator(
+        store: fixture.store,
+        eventReader: FakeEventReader(session: session),
+        metadataReader: POSIXFileMetadataReader(
+            diskArbitration: IncrementalMountProvider(volume: fixture.volume),
+            managedAbsolutePaths: []
+        ),
+        fullScanner: racingScanner,
+        diskUsageSampler: FakeDiskSampler(sampleValue: sample),
+        volumeDiscovery: StaticVolumeDiscovery(
+            topology: VolumeTopology(
+                domains: [fixture.scope.domain],
+                volumes: [fixture.volume],
+                discoveredAt: Date(timeIntervalSince1970: 20)
+            )
+        ),
+        clock: AdvancingClock(Date(timeIntervalSince1970: 20))
+    )
+    let outcome = try await coordinator.run(
+        volume: fixture.volume,
+        scope: fixture.scope,
+        mode: .daily
+    )
+
+    #expect(outcome.reconciliation.eventChanges.isEmpty)
+    #expect(outcome.reconciliation.snapshotChanges.map(\.kind).contains(.snapshotAddition))
+    #expect(outcome.reconciliation.reconciliationChanges.isEmpty)
+}
+
+@Test("Daily full establishes current E0 even when yesterday journal UUID and cursor differ")
+func dailyFullIgnoresOldJournal() async throws {
+    let fixture = try await IncrementalFixture.make()
+    defer { fixture.remove() }
+    let replacementUUID = UUID()
+    let refreshedVolume = MonitoredVolume(
+        id: fixture.volume.id,
+        storageDomainID: fixture.volume.storageDomainID,
+        filesystemUUID: fixture.volume.filesystemUUID,
+        volumeGroupUUID: fixture.volume.volumeGroupUUID,
+        eventStoreUUID: replacementUUID,
+        deviceID: fixture.volume.deviceID,
+        mountPath: fixture.volume.mountPath,
+        displayName: fixture.volume.displayName,
+        role: fixture.volume.role,
+        isInternal: true,
+        isRemovable: false,
+        isReadOnly: false,
+        supportsPersistentEvents: true,
+        topologyFingerprint: fixture.volume.topologyFingerprint,
+        inventoryMode: .full
+    )
+    let recoverySession = FakeEventSession(
+        historical: [],
+        live: [],
+        historyFence: EventCursorFence(
+            volumeID: fixture.volume.id,
+            eventStoreUUID: replacementUUID,
+            highestFullyDeliveredEventID: nil,
+            phase: .historyDone,
+            trust: .trusted
+        ),
+        liveFence: EventCursorFence(
+            volumeID: fixture.volume.id,
+            eventStoreUUID: replacementUUID,
+            highestFullyDeliveredEventID: 1,
+            phase: .liveFlush,
+            trust: .trusted
+        )
+    )
+    let catchupSession = FakeEventSession(
+        historical: [],
+        live: [],
+        historyFence: EventCursorFence(
+            volumeID: fixture.volume.id,
+            eventStoreUUID: replacementUUID,
+            highestFullyDeliveredEventID: 1,
+            phase: .historyDone,
+            trust: .trusted
+        ),
+        liveFence: EventCursorFence(
+            volumeID: fixture.volume.id,
+            eventStoreUUID: replacementUUID,
+            highestFullyDeliveredEventID: 1,
+            phase: .liveFlush,
+            trust: .trusted
+        )
+    )
+    let eventReader = QueuedEventReader([recoverySession, catchupSession])
+    let sample = try StorageSample(
+        storageDomainID: fixture.scope.domain.id,
+        sampledAt: Date(timeIntervalSince1970: 20),
+        capacityBytes: 1_000_000,
+        usedBytes: 100_000,
+        availableBytes: 900_000
+    )
+    let scanner = FileInventoryScanner(
+        configuration: try FileInventoryScannerConfiguration(
+            managedAbsolutePaths: [],
+            validateMountIdentity: false
+        )
+    )
+    let coordinator = FullScanCoordinator(
+        store: fixture.store,
+        eventReader: eventReader,
+        metadataReader: POSIXFileMetadataReader(
+            diskArbitration: IncrementalMountProvider(volume: refreshedVolume),
+            managedAbsolutePaths: []
+        ),
+        fullScanner: scanner,
+        diskUsageSampler: FakeDiskSampler(sampleValue: sample),
+        volumeDiscovery: StaticVolumeDiscovery(
+            topology: VolumeTopology(
+                domains: [fixture.scope.domain],
+                volumes: [refreshedVolume],
+                discoveredAt: Date(timeIntervalSince1970: 20)
+            )
+        ),
+        clock: AdvancingClock(Date(timeIntervalSince1970: 20))
+    )
+    let outcome = try await coordinator.run(
+        volume: refreshedVolume,
+        scope: StorageDomainScope(domain: fixture.scope.domain, volumes: [refreshedVolume]),
+        mode: .daily
+    )
+
+    let checkpoints = await eventReader.openedCheckpoints
+    #expect(checkpoints.count == 2)
+    #expect(checkpoints[0] == nil)
+    #expect(checkpoints[1]?.eventStoreUUID == replacementUUID)
+    #expect(checkpoints[1]?.lastEventID == 1)
+    #expect(outcome.reconciliation.reconciliationChanges.isEmpty)
+    #expect(outcome.checkpoint.eventStoreUUID == replacementUUID)
+    #expect(outcome.checkpoint.lastCommittedEventID == 1)
+    #expect(outcome.reconciliation.eventChanges.isEmpty)
+}
+
+@Test("Daily full snapshot growth survives report persistence without correction alerts")
+func dailyFullReportsSnapshotDifference() async throws {
+    let fixture = try await IncrementalFixture.make(storeClock: AdvancingClock(Date(timeIntervalSince1970: 86400)))
+    defer { fixture.remove() }
+    try Data(repeating: 0x41, count: 16_384).write(to: fixture.root.appendingPathComponent("a"))
+    try Data(repeating: 0x42, count: 24_576).write(to: fixture.root.appendingPathComponent("b"))
+
+    try FileManager.default.removeItem(at: fixture.root.appendingPathComponent("c-old"))
+    let historyEvent = FileSystemEvent(
+        id: 11,
+        volumeID: fixture.volume.id,
+        path: try RelativePath(validating: "a"),
+        flags: [.modified, .isFile]
+    )
+    let session = FakeEventSession(
+        historical: [try EventBatch(events: [historyEvent])],
+        live: [],
+        historyFence: EventCursorFence(
+            volumeID: fixture.volume.id,
+            eventStoreUUID: fixture.eventStoreUUID,
+            highestFullyDeliveredEventID: 11,
+            phase: .historyDone,
+            trust: .trusted
+        ),
+        liveFence: EventCursorFence(
+            volumeID: fixture.volume.id,
+            eventStoreUUID: fixture.eventStoreUUID,
+            highestFullyDeliveredEventID: 11,
+            phase: .liveFlush,
+            trust: .trusted
+        )
+    )
+    let sample = try StorageSample(
+        storageDomainID: fixture.scope.domain.id,
+        sampledAt: Date(timeIntervalSince1970: 20),
+        capacityBytes: 1_000_000,
+        usedBytes: 140_000,
+        availableBytes: 860_000
+    )
+    let fullScanner = FileInventoryScanner(
+        configuration: try FileInventoryScannerConfiguration(
+            managedAbsolutePaths: [],
+            validateMountIdentity: false
+        )
+    )
+    let coordinator = FullScanCoordinator(
+        store: fixture.store,
+        eventReader: FakeEventReader(session: session),
+        metadataReader: POSIXFileMetadataReader(
+            diskArbitration: IncrementalMountProvider(volume: fixture.volume),
+            managedAbsolutePaths: []
+        ),
+        fullScanner: fullScanner,
+        diskUsageSampler: FakeDiskSampler(sampleValue: sample),
+        volumeDiscovery: StaticVolumeDiscovery(
+            topology: VolumeTopology(
+                domains: [fixture.scope.domain],
+                volumes: [fixture.volume],
+                discoveredAt: Date(timeIntervalSince1970: 20)
+            )
+        ),
+        clock: AdvancingClock(Date(timeIntervalSince1970: 20))
+    )
+    let outcome = try await coordinator.run(
+        volume: fixture.volume,
+        scope: fixture.scope,
+        mode: .daily
+    )
+
+    #expect(outcome.reconciliation.eventChanges.isEmpty)
+    #expect(outcome.reconciliation.reconciliationChanges.isEmpty)
+    #expect(outcome.reconciliation.breakdown == nil)
+    #expect(
+        outcome.reconciliation.snapshotChanges.contains {
+            $0.pathBefore?.displayString == "c-old" && $0.allocatedDelta < 0
+        })
+    #expect(outcome.reconciliation.snapshotChanges.filter { $0.pathAfter?.displayString == "a" }.count == 1)
+    #expect(!outcome.reconciliation.snapshotChanges.contains { $0.pathAfter?.displayString == "a-baseline-link" })
+    #expect(
+        outcome.reconciliation.snapshotChanges.contains { $0.pathAfter?.displayString == "a" && $0.allocatedDelta > 0 })
+    #expect(
+        outcome.reconciliation.snapshotChanges.contains { $0.pathAfter?.displayString == "b" && $0.allocatedDelta > 0 })
+    #expect(outcome.checkpoint.activeGenerationID != fixture.baselineCheckpoint.activeGenerationID)
+
+    let reportDirectory = fixture.databaseRoot.appendingPathComponent("Reports", isDirectory: true)
+    let generated = try await DailyReportCoordinator(
+        store: fixture.store,
+        diagnosticsCoordinator: PhysicalDiagnosticsCoordinator(
+            deletedOpenFileProbe: EmptyDeletedOpenProbe()
+        ),
+        reportWriter: LocalReportWriter(directory: reportDirectory),
+        clock: AdvancingClock(Date(timeIntervalSince1970: 172801))
+    ).generate(outcome: outcome, scope: fixture.scope)
+    #expect(generated.report.accounting.reconciliationCorrection == 0)
+    #expect(generated.report.accounting.eventAttributedDelta == 0)
+    #expect(generated.report.accounting.snapshotComparedDelta > 0)
+    #expect(generated.report.accounting.snapshotComparedDelta == generated.report.accounting.reconciledIndexedDelta)
+    let alerts = try AlertPolicy(thresholds: AlertThresholds(reconciliationBytes: 1)).evaluate(
+        report: generated.report, currentSample: sample)
+    #expect(alerts?.reasons.contains(.largeReconciliation) != true)
+    let reader = try SQLiteReportStore(databaseURL: fixture.databaseRoot.appendingPathComponent("DailyDisk.sqlite"))
+    #expect(
+        try await reader.latestSuccessfulFullReportDate(for: fixture.scope.domain.id)
+            == Date(timeIntervalSince1970: 86401))
+    #expect(FileManager.default.fileExists(atPath: generated.artifacts.jsonURL.path))
+    let retried = try await DailyReportCoordinator(
+        store: fixture.store,
+        diagnosticsCoordinator: PhysicalDiagnosticsCoordinator(
+            deletedOpenFileProbe: EmptyDeletedOpenProbe()
+        ),
+        reportWriter: LocalReportWriter(directory: reportDirectory),
+        clock: AdvancingClock(Date(timeIntervalSince1970: 999))
+    ).generate(outcome: outcome, scope: fixture.scope)
+    #expect(retried.report == generated.report)
+    #expect(
+        try await reader.latestSuccessfulFullReportDate(for: fixture.scope.domain.id)
+            == Date(timeIntervalSince1970: 86401))
+    #expect(retried.artifacts == generated.artifacts)
+}
+
+@Test("Daily full rejects scan-time journal loss or cancellation without activating staging", arguments: [false, true])
+func dailyFullRejectsScanTimeLoss(cancel: Bool) async throws {
+    let fixture = try await IncrementalFixture.make()
+    defer { fixture.remove() }
+    let replacementUUID = UUID()
+    let refreshedVolume = MonitoredVolume(
+        id: fixture.volume.id,
+        storageDomainID: fixture.volume.storageDomainID,
+        filesystemUUID: fixture.volume.filesystemUUID,
+        volumeGroupUUID: fixture.volume.volumeGroupUUID,
+        eventStoreUUID: replacementUUID,
+        deviceID: fixture.volume.deviceID,
+        mountPath: fixture.volume.mountPath,
+        displayName: fixture.volume.displayName,
+        role: fixture.volume.role,
+        isInternal: true,
+        isRemovable: false,
+        isReadOnly: false,
+        supportsPersistentEvents: true,
+        topologyFingerprint: fixture.volume.topologyFingerprint,
+        inventoryMode: .full
+    )
+    let recoverySession = FakeEventSession(
+        historical: [],
+        live: [],
+        historyFence: EventCursorFence(
+            volumeID: fixture.volume.id,
+            eventStoreUUID: replacementUUID,
+            highestFullyDeliveredEventID: nil,
+            phase: .historyDone,
+            trust: .trusted
+        ),
+        liveFence: EventCursorFence(
+            volumeID: fixture.volume.id,
+            eventStoreUUID: replacementUUID,
+            highestFullyDeliveredEventID: 1,
+            phase: .liveFlush,
+            trust: .trusted
+        )
+    )
+    let catchupSession = FakeEventSession(
+        historical: [],
+        live: [],
+        historyFence: EventCursorFence(
+            volumeID: fixture.volume.id,
+            eventStoreUUID: replacementUUID,
+            highestFullyDeliveredEventID: 1,
+            phase: .historyDone,
+            trust: cancel ? .trusted : .fullScanRequired
+        ),
+        liveFence: EventCursorFence(
+            volumeID: fixture.volume.id,
+            eventStoreUUID: replacementUUID,
+            highestFullyDeliveredEventID: 1,
+            phase: .liveFlush,
+            trust: cancel ? .trusted : .fullScanRequired
+        )
+    )
+    let eventReader = QueuedEventReader([recoverySession, catchupSession])
+    let sample = try StorageSample(
+        storageDomainID: fixture.scope.domain.id,
+        sampledAt: Date(timeIntervalSince1970: 20),
+        capacityBytes: 1_000_000,
+        usedBytes: 100_000,
+        availableBytes: 900_000
+    )
+    let scanner = FileInventoryScanner(
+        configuration: try FileInventoryScannerConfiguration(
+            managedAbsolutePaths: [],
+            validateMountIdentity: false
+        )
+    )
+    let coordinator = FullScanCoordinator(
+        store: fixture.store,
+        eventReader: eventReader,
+        metadataReader: POSIXFileMetadataReader(
+            diskArbitration: IncrementalMountProvider(volume: refreshedVolume),
+            managedAbsolutePaths: []
+        ),
+        fullScanner: scanner,
+        diskUsageSampler: FakeDiskSampler(sampleValue: sample),
+        volumeDiscovery: StaticVolumeDiscovery(
+            topology: VolumeTopology(
+                domains: [fixture.scope.domain],
+                volumes: [refreshedVolume],
+                discoveredAt: Date(timeIntervalSince1970: 20)
+            )
+        ),
+        clock: AdvancingClock(Date(timeIntervalSince1970: 20)),
+        maximumRecoveryAttempts: 0
+    )
+    let tracker = RecordingProgressTracker(cancelAtPhase: cancel ? .sealingInventory : nil)
+    await #expect(throws: (any Error).self) {
+        _ = try await coordinator.run(
+            volume: refreshedVolume,
+            scope: StorageDomainScope(domain: fixture.scope.domain, volumes: [refreshedVolume]), mode: .daily,
+            trigger: .manual, progressTracker: tracker)
+    }
+    #expect(try await fixture.store.state(for: fixture.volume.id)?.checkpoint == fixture.baselineCheckpoint)
+    #expect(try await fixture.store.activeRuns().isEmpty)
 }

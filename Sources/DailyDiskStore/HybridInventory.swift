@@ -36,6 +36,12 @@ final class HybridInventoryWriter {
             UPDATE SET kind=excluded.kind,logical_bytes=excluded.logical_bytes,
               allocated_bytes=excluded.allocated_bytes,link_count=excluded.link_count,
               modified_at=excluded.modified_at,metadata_changed_at=excluded.metadata_changed_at
+            WHERE hybrid_objects.kind IS NOT excluded.kind
+              OR hybrid_objects.logical_bytes IS NOT excluded.logical_bytes
+              OR hybrid_objects.allocated_bytes IS NOT excluded.allocated_bytes
+              OR hybrid_objects.link_count IS NOT excluded.link_count
+              OR hybrid_objects.modified_at IS NOT excluded.modified_at
+              OR hybrid_objects.metadata_changed_at IS NOT excluded.metadata_changed_at
             """)
             """)
         membership = try database.prepare(
@@ -50,6 +56,7 @@ final class HybridInventoryWriter {
             INSERT INTO hybrid_order VALUES(?,?,?)
             ON CONFLICT(generation_id,path) DO UPDATE SET
               path_id=CASE WHEN hybrid_order.path_id=excluded.path_id THEN excluded.path_id ELSE NULL END
+            WHERE hybrid_order.path_id IS NOT excluded.path_id
             """)
         lookup = try database.prepare("SELECT id FROM hybrid_nodes WHERE COALESCE(parent_id,0)=? AND name=?")
         insertNode = try database.prepare("INSERT INTO hybrid_nodes(parent_id,name) VALUES(?,?)")

@@ -1,7 +1,7 @@
 import Foundation
 
 public enum DailyDiskSchema {
-    public static let currentVersion = 6
+    public static let currentVersion = 7
     public static let expectedMigrations: [(version: Int, name: String)] = [
         (1, "initial"),
         (2, "one_full_volume_per_domain"),
@@ -9,6 +9,7 @@ public enum DailyDiskSchema {
         (4, "generation_cleanup"),
         (5, "space_maintenance"),
         (6, "hybrid_inventory"),
+        (7, "daily_full_reports"),
     ]
 }
 
@@ -34,6 +35,7 @@ enum DatabaseMigrator {
         Migration(version: 4, name: "generation_cleanup", resourceName: "004_generation_cleanup"),
         Migration(version: 5, name: "space_maintenance", resourceName: "005_space_maintenance"),
         Migration(version: 6, name: "hybrid_inventory", resourceName: "006_hybrid_inventory"),
+        Migration(version: 7, name: "daily_full_reports", resourceName: "007_daily_full_reports"),
     ]
 
     static func migrate(

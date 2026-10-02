@@ -12,10 +12,20 @@ public actor SQLiteInventoryStore: InventoryStoring {
     let database: SQLiteDatabase
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
+    private let clock: any Clock
 
     public init(databaseURL: URL = SQLiteInventoryStore.defaultDatabaseURL) throws {
+        try self.init(databaseURL: databaseURL, checkpointPolicy: .bounded())
+    }
+
+    public init(databaseURL: URL, checkpointPolicy: WALCheckpointPolicy) throws {
+        try self.init(databaseURL: databaseURL, checkpointPolicy: checkpointPolicy, clock: SystemClock())
+    }
+
+    public init(databaseURL: URL, checkpointPolicy: WALCheckpointPolicy, clock: any Clock) throws {
+        self.clock = clock
         processLease = try ProcessLease(databaseURL: databaseURL)
-        database = try SQLiteDatabase(url: databaseURL)
+        database = try SQLiteDatabase(url: databaseURL, checkpointPolicy: checkpointPolicy)
         encoder = JSONEncoder()
         decoder = JSONDecoder()
     }
@@ -678,6 +688,23 @@ public actor SQLiteInventoryStore: InventoryStoring {
         return changes
     }
 
+    public func deriveSnapshotChanges(
+        authoritative: InventoryMutationTarget, runID: ScanRun.ID, observer: any ScanWorkObserving
+    ) async throws -> [ChangeRecord] {
+        try await observer.checkpoint()
+        try requireRunningRun(runID)
+        let descriptor = try resolve(target: authoritative, runID: runID)
+        try verifyTargetSealed(descriptor, runID: runID)
+        guard let previous = try loadState(for: descriptor.volumeID)?.checkpoint else { return [] }
+        let changes = try await collectTransitionChanges(
+            from: .generation(previous.activeGenerationID), to: .overlay(descriptor, runID),
+            source: .snapshotComparison, runID: runID, observer: observer
+        )
+        try verifyTargetSealed(descriptor, runID: runID)
+        try verifyPreviousCheckpoint(previous, volumeID: descriptor.volumeID)
+        return changes
+    }
+
     public func deriveReconciliationChanges(
         expected: InventoryMutationTarget,
         authoritative: InventoryMutationTarget,
@@ -1031,6 +1058,22 @@ public actor SQLiteInventoryStore: InventoryStoring {
             try cleanupStagingState(runID: commit.runID)
             try pruneGenerations(volumeID: commit.volumeID, runID: commit.runID)
         }
+        if commit.runKind != .incremental {
+            let completedAt = await clock.now()
+            // COMMIT has already succeeded. Failure to record completion must
+            // not masquerade as scan rollback: absent markers conservatively
+            // do not satisfy daily-full deduplication, even after report recovery.
+            try? database.transaction {
+                let completion = try database.prepare(
+                    """
+                    UPDATE scan_runs SET inventory_completed_at = ?
+                    WHERE id = ? AND status = 'succeeded' AND inventory_completed_at IS NULL
+                    """)
+                try completion.bind(completedAt.timeIntervalSince1970, at: 1)
+                try completion.bind(commit.runID.rawValue.uuidString, at: 2)
+                _ = try completion.step()
+            }
+        }
     }
 
     public func commitReport(_ commit: ReportCommit) async throws {
@@ -1085,8 +1128,9 @@ public actor SQLiteInventoryStore: InventoryStoring {
                     run_id, storage_domain_id, generated_at,
                     event_attributed_delta, reconciliation_correction,
                     reconciled_indexed_delta, dailydisk_overhead_delta,
-                    physical_used_delta, physical_unattributed_delta, payload_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    physical_used_delta, physical_unattributed_delta, payload_json,
+                    snapshot_compared_delta, published_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """
             )
             let accounting = commit.report.accounting
@@ -1100,8 +1144,13 @@ public actor SQLiteInventoryStore: InventoryStoring {
             try statement.bind(accounting.physicalUsedDelta, at: 8)
             try statement.bind(accounting.physicalUnattributedDelta, at: 9)
             try statement.bind(payload, at: 10)
+            try statement.bind(accounting.snapshotComparedDelta, at: 11)
+            try statement.bind(commit.publishedAt.timeIntervalSince1970, at: 12)
             _ = try statement.step()
         }
+        // Publication is a deliberate checkpoint boundary; busy readers may
+        // defer truncation without invalidating the committed report.
+        try? database.checkpointWAL(waitForReaders: false)
     }
 
     public func report(
@@ -2355,11 +2404,13 @@ extension SQLiteInventoryStore {
             if let previous = commit.previousCheckpoint {
                 let base = ValidationState.generation(previous.activeGenerationID)
                 let expected: ValidationState
-                if try hasRunTarget(
-                    runID: commit.runID,
-                    kind: "active",
-                    id: commit.volumeID.rawValue
-                ) {
+                if !commit.comparesSnapshots,
+                    try hasRunTarget(
+                        runID: commit.runID,
+                        kind: "active",
+                        id: commit.volumeID.rawValue
+                    )
+                {
                     let descriptor = try resolve(
                         target: .expectedActive(volumeID: commit.volumeID),
                         runID: commit.runID,
@@ -2381,7 +2432,7 @@ extension SQLiteInventoryStore {
                 try validateTransition(
                     from: expected,
                     to: .overlay(authoritative, commit.runID),
-                    source: .reconciliation,
+                    source: commit.comparesSnapshots ? .snapshotComparison : .reconciliation,
                     runID: commit.runID,
                     pathMutationTarget: nil,
                     allowCancellation: false
@@ -2518,7 +2569,9 @@ extension SQLiteInventoryStore {
         guard let identity = old?.identity ?? new?.identity else { return [] }
         switch (old, new) {
         case (.none, .some(let new)):
-            let kind: ChangeKind = source == .reconciliation ? .reconciliationAddition : .eventCreated
+            let kind: ChangeKind =
+                source == .snapshotComparison
+                ? .snapshotAddition : source == .reconciliation ? .reconciliationAddition : .eventCreated
             return [
                 try ChangeRecord(
                     runID: runID,
@@ -2532,7 +2585,9 @@ extension SQLiteInventoryStore {
                 )
             ]
         case (.some(let old), .none):
-            let kind: ChangeKind = source == .reconciliation ? .reconciliationRemoval : .eventRemoved
+            let kind: ChangeKind =
+                source == .snapshotComparison
+                ? .snapshotRemoval : source == .reconciliation ? .reconciliationRemoval : .eventRemoved
             return [
                 try ChangeRecord(
                     runID: runID,
@@ -2548,7 +2603,9 @@ extension SQLiteInventoryStore {
         case (.some(let old), .some(let new)):
             var result: [ChangeRecord] = []
             if old.footprint != new.footprint {
-                let kind: ChangeKind = source == .reconciliation ? .reconciliationCorrection : .eventModified
+                let kind: ChangeKind =
+                    source == .snapshotComparison
+                    ? .snapshotModification : source == .reconciliation ? .reconciliationCorrection : .eventModified
                 result.append(
                     try ChangeRecord(
                         runID: runID,

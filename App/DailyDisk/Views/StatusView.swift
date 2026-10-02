@@ -119,7 +119,7 @@ struct StatusView: View {
                 icon: "checkmark.shield.fill", color: Theme.warning)
         } else if controller.launchAgentStatus != .enabled {
             banner(
-                "一次设置，每天自动检查", "启用后会开始检查，并在每天 09:00 自动运行。检查结束后后台任务会退出。",
+                "一次设置，每天自动检查", "启用后会开始检查，并在每天 05:00 自动运行。检查结束后后台任务会退出。",
                 icon: "clock.fill", color: Theme.accent)
         } else {
             switch controller.scanState {

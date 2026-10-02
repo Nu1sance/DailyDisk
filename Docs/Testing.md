@@ -82,7 +82,7 @@ These checks require a persistent local signing identity and cannot run safely o
    launchctl unsetenv DAILYDISK_DRY_RUN
    ```
 9. Deny notification permission and verify scan/report success remains unaffected.
-10. Exercise sleep past 09:00 and confirm the next login/wake invocation runs once.
+10. For the planned rollout, exercise sleep past 05:00 and confirm the next eligible login/wake invocation runs once. Current installed behavior remains 09:00 until the schedule is changed; do not report the 05:00 gate as passed against that build.
 11. In the GUI, click **立即检查** after a same-day report and confirm a new run/report is created; close/reopen during the scan and cancel once before commit.
 
 ## Real-system acceptance
@@ -417,3 +417,69 @@ After the installed run, strict `dailydiskctl verify` exited 0: integrity check 
 ### Reinstall registration concurrency (2026-09-30)
 
 Two concurrent start calls can both observe a missing launchd job before either repair finishes. A synchronized synthetic regression initially reproduced two unregister/register cycles; the second could terminate the helper started by the first. Registration revision checks now invalidate stale missing results across successful and failed registration changes. Tests cover successful attachment, registration failure and a job that remains missing. The default concurrent suite passed 250 tests in 7.301 seconds (three opt-in workloads skipped); format, build, LaunchAgent lint and whitespace checks passed. No installed registration was altered for these tests.
+
+### Full-fallback diagnostic probes (2026-09-29)
+
+Synthetic probe coverage exercises enabled/disabled mailbox delivery and trust, ordered overflow/UUID causes, late-callback attempt isolation, native Unix/CF cursor fallback and invalid device conversion. Coordinator tests cover initial, forced, periodic and incremental decisions, typed UUID rejection followed by successful full recovery, request/attempt association, and preservation of the old checkpoint before recovery. Existing scanner tests continue to cover quiet streams, filesystem mutations, ambiguity and cancellation; not every existing scenario has a new probe-specific assertion.
+
+Logger tests cover private permissions, bounded rotation, path-field rejection, a saturated queue with preferential critical retention, disabled output, unavailable output and symlink rejection. A 102,400-event synthetic mailbox workload compares off/summary/detail delivery and trust. One local run measured 0.177/0.178/0.214 seconds respectively with zero diagnostic drops; these are fixed-order microbenchmark observations, not end-to-end scan or statistical performance guarantees. Queue/file limits are asserted; process RSS and long-running real scan overhead remain to be measured. Run the focused checks with `swift test --filter 'probe|Probe'`.
+
+Installed multi-day observation and reconstruction of a real fallback remain pending. Successful synthetic runs cannot prove the historical intermittent issue is fixed. See Operations for probe interpretation and retention limits.
+
+Final default concurrent suite: 252 tests passed in 7.849 seconds (three opt-in million-row workloads skipped). Format lint, `swift build`, LaunchAgent lint and whitespace checks passed. This round did not install the app, run a new inventory or change the installed database.
+
+Subsequent installed acceptance: after confirming the helper was idle, replaced the original app using the existing persistent signing identity and reopened the GUI. All three executable designated requirements matched; deep strict signature verification and helper dry-run passed. Under the stable data and exclusive writer leases, before/after checkpoint, scan-run and report records matched. The scheduled helper registration remains present and idle. No new scan was requested; real fallback and multi-day observation remain pending.
+
+### Temporary journal observer (2026-09-30)
+
+Four standalone Python tests passed for journal/device transitions, unavailable UUIDs, block-device selection despite root firmlink identity, elapsed/deadline behavior and private bounded output with failure handling. A short native run sampled internal Data, System snapshot and the external test mount, then exited at its deadline. The separately started 24-hour observer has emitted valid samples; natural UUID-change capture remains pending. Default Swift suite passed 252 tests in 7.972 seconds (three opt-in workloads skipped); format, build, LaunchAgent and whitespace checks passed. No installed app or database change was made.
+
+The finite live journal recorder passed a three-second native start/deadline/child-stop smoke check and a synthetic rotation test covering 25 near-limit records, ten-file retention, complete lines, 0600 permissions, oversized-record rejection and closed-output rejection. The four existing observer tests also passed. Both native collection modes are diagnostic-only; they do not establish that future incidents will be fully explained.
+
+### Fatal mailbox replay exits (2026-09-30)
+
+Added cooperative replay checks before history/live drains and before/after consumption, propagated into mutation/subtree observers. Synthetic pressure before HistoryDone verifies that subsequent work is not consumed; a separate case distinguishes repairable subtree flags from fatal live loss. Coordinator recovery runs both fence-rejection and thrown-fast-failure variants, checks session stop, retains the old checkpoint until recovery and commits only the successful recovery attempt. Default concurrent suite passed 254 tests in 6.974 seconds (three opt-in workloads skipped). Format lint, build, LaunchAgent lint and whitespace checks passed. No schema change or installed app update was performed.
+
+### Daily-full write budget and CI cancellation fixture (2026-10-01)
+
+`millionRecordInventory` reports phase deltas of the test process's Darwin disk-write counter. Run this opt-in test in isolation; counters measure process-attributed I/O, not database allocation or SSD NAND wear. See `Docs/DailyFullScan.md` for phase boundaries, workload exclusions and the daily-full design review. Instrumentation adds no normal helper writes and does not change SQLite durability.
+
+The process-runner timeout/cancellation fixture uses an owner-only FIFO held open by the parent. The shell blocks on a builtin read without spawning another process; the cancellation branch first signals a ready file. Both timeout and cancellation now act on a waiting process, rather than assuming a two-second sleep outlasts a 50-millisecond task suspension. A bounded readiness deadline and runner timeout still expose hangs. No CI retries or suite serialization were added.
+
+Validation: isolated million-row workload passed in 475.784 seconds; the default concurrent suite passed 261 tests in 7.691 seconds (three opt-in workloads skipped). Format, build, LaunchAgent and whitespace checks passed. No real inventory database or installed application was changed. Real scheduled-helper I/O acceptance remains outstanding; synthetic process counters do not establish device lifespan.
+
+
+### Daily 05:00 full policy: acceptance gates
+
+The ordered implementation and measurement gates are in [DailyFullScan.md](DailyFullScan.md). Source regression status and installed limitations are recorded below:
+
+- Daily due request chooses full even if yesterday completed less than 24 hours earlier; a pre-05:00 manual full satisfies today's automatic gate after report publication.
+- No same-day successful full: manual request chooses full. With one: manual request chooses incremental; lost history/UUID replacement fails fast and falls back to full. Advanced full recheck still forces full.
+- Attach to in-flight work. Failed/cancelled attempts do not satisfy daily success or erase a previous same-day success; failed notifications do not invalidate a published report.
+- Test missed schedule/login/wake, midnight-spanning completion, DST/time-zone changes, pending-report recovery and no resident retry loop.
+- Daily full ignores old journal identity but retains current E0–E1 trust, opaque preservation, hard links, cancellation and atomic activation.
+- Report normal full-comparison growth without false correction alerts; preserve old report interpretation.
+- Compare bounded checkpoints/batch sizes with equal fixtures and FULL durability, including WAL limits under GUI readers, crash recovery, final CLI readability and phase-specific write counts.
+- Update plist, due defaults, UI schedule strings, lint/installation tests and registered helper together; verify installed 05:00 behavior with the stable signature. Sample one real due full run before claiming installed write-budget acceptance.
+
+### Daily-full implementation validation (2026-10-01)
+
+Final clean-build concurrent suite: 275 tests passed, with four opt-in workloads disabled. New coverage includes local-calendar day selection, pre-05:00 manual completion, midnight completion and delayed publication, DST/time zones, failed-full success preservation, report recovery followed by a due full through persisted Control, current-journal E0 without old UUID replay, E0–E1 loss/cancellation, opaque preservation, hard-link nonduplication, positive/negative snapshot attribution and correction-alert separation. Schema-7 migration preserves payload bytes; old reports default snapshot bytes to zero.
+
+Bounded WAL tests retain FULL durability, pin a read transaction until the inter-transaction limit blocks further writes, require strict readers to refuse nonempty WAL, then verify final truncation/readability. A subprocess is killed after committed WAL plus an uncommitted transaction; reopening retains only committed content. A full-suite crash exposed checkpoint-on-close using an unowned Swift reference during database deinit; the crash stack identified `SQLiteStatement.step` -> `checkpointWAL` -> database deinit. Close now uses the native SQLite API, with an explicit disappearing-storage regression. Tests were rerun after this fix; no test serialization/retry workaround was used.
+
+The write fixture initially failed due to subsecond timestamp round-trip equality and expiry derived from the sample time rather than actual retirement time. It now uses exact increasing sample seconds and advances the maintenance clock from actual current time. Those failed runs are excluded from comparison results. Successful A/B results and limits are in [DailyFullScan.md](DailyFullScan.md).
+
+Original `millionRecordInventory` also passed under the new bounded production writer in 436.34 seconds: opaque preservation 63.75 s, full diff 26.61 s, post-maintenance narrow lookup/commit 0.0234/0.0057 s, mixed incremental seal/derive/commit 0.2125/0.0924/0.1950 s. All existing budgets held. New daily-path million-row coverage passed in 200.56 s; these workloads differ and their elapsed times are not directly comparable. Both large runs preceded the final post-commit completion-marker refinement; final source was then verified by a clean full suite and all three isolated 100k A/B variants.
+
+After adding the completion clock field, one incremental-build suite exited with SIGBUS at the Swift asynchronous job entry; its crash stack did not identify a source-level fault. A clean rebuild passed the entire suite. Earlier stale-symbol linking also occurred during initializer changes. Stale build products are a plausible explanation, not a proven diagnosis of the SIGBUS. No passing rerun without a clean rebuild is used to hide that failure. The independent unowned-reference close crash above had a confirmed code cause and an explicit fix/regression.
+
+Installed acceptance update (2026-10-01): Computer Use access is now working. Removed the old job through Settings, quit the GUI, and installed GUI/helper/CLI together at the original path with the same persistent signing identity. All three designated requirements match and deep strict verification passes. Re-registered through Settings; both GUI and launchd now show 05:00 (Hour 5, Minute 0). The RunAtLoad helper migrated schema 6 to 7, recognized today's published full report, returned skippedNotDue and exited with status 0; no additional inventory scan was launched. Lease-protected comparison preserved the active checkpoint and all nine historical reports. Notification permission remains allowed; the GUI disk-access probe reports three accessible protected locations and zero denials. Overview and the nine-report history page render correctly with paths hidden by default. Fixed the stale advanced-settings seven-day description to daily 05:00 and rebuilt/reinstalled; format, LaunchAgent and whitespace checks pass. The final post-install source suite passed all 275 tests in 7.086 seconds (four opt-in workloads disabled). Installed strict CLI verification also passed: integrity ok, schema 7, zero foreign-key/inventory/report violations and zero abandoned runs. This supersedes the prior Computer Use blocker and not-installed status. The remaining acceptance item is whole-helper write measurement during one naturally due full scan; do not repeat real scans just for benchmarking.
+
+
+### Write-path review follow-up (2026-10-02)
+
+[WriteOptimizationReview.md](WriteOptimizationReview.md) defines the next isolated experiments and acceptance gates. A same-structure in-memory WITHOUT ROWID fixture confirmed via index_xinfo that the reverse UNIQUE(generation_id,path_id) index also stores the full path as a primary-key locator. This proves representation duplication, not a measured reduction from an alternative layout. Real phase I/O counters measure process writes and cannot be read as NAND wear or final file growth. No new full-disk or million-row workload was run for this documentation review.
+
+
+2026-10-02 主线发布准备：W6 提升为主要低写入架构，详见 Docs/WriteOptimizationReview.md。新增相同对象/排序映射 no-op UPDATE 防护，membership 返回值、opaque 计数、seal 失效和冲突检测不变。默认并发 276 项通过（7.001 秒，4 个 opt-in 未启用）；格式、构建、LaunchAgent lint、diff 检查及两个开发诊断脚本的 5 项测试通过。此前已验收的 schema 7/05:00/探针改动一并提交；不把小改动宣称为 W6 完成，不更新本机安装或触发扫描。

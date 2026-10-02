@@ -144,6 +144,7 @@ public actor ScanProgressTracker: ScanProgressTracking {
     }
 
     public func transition(to nextPhase: ScanProgressPhase, mode nextMode: ScanExecutionMode? = nil) async throws {
+        ScanProbe.emit(.phaseChanged, fields: ["phase": nextPhase.rawValue])
         if nextPhase != .cancelling, nextPhase != .cancelled, nextPhase != .cleaningUpFailedRun,
             phase.allowsCancellation
         {
@@ -153,6 +154,10 @@ public actor ScanProgressTracker: ScanProgressTracking {
         guard ScanProgressTransitionValidator.canTransition(from: phase, to: nextPhase) else {
             throw ScanProgressError.invalidPhaseTransition(from: phase, to: nextPhase)
         }
+        // The coordinator may finish recovering an incremental report and
+        // still owe today's full scan. Only publication -> preparation opens
+        // a new scan mode; commit itself remains non-cancellable.
+        if phase == .publishingReport, nextPhase == .preparing { mode = nil }
         if let nextMode {
             let isRecoveryUpgrade = nextPhase == .preparing && nextMode == .recoveryFull
             guard mode == nil || mode == nextMode || isRecoveryUpgrade else {

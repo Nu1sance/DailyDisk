@@ -178,6 +178,8 @@ public enum HardLinkCanonicalizer {
             kind = .eventAttributionTransfer
         case .reconciliation:
             kind = .reconciliationAttributionTransfer
+        case .snapshotComparison:
+            kind = .snapshotAttributionTransfer
         case .baseline:
             throw ModelValidationError.invalidChangeCombination
         }

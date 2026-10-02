@@ -16,31 +16,21 @@ public enum ScanDecision: Equatable, Sendable {
 }
 
 public struct ScanPolicy: Sendable {
-    public let fullScanInterval: TimeInterval
-
-    public init(fullScanInterval: TimeInterval = 7 * 24 * 60 * 60) throws {
-        guard fullScanInterval.isFinite, fullScanInterval > 0 else {
-            throw ScanPolicyError.invalidFullScanInterval
-        }
-        self.fullScanInterval = fullScanInterval
-    }
-
-    public static let `default` = try! ScanPolicy()
+    public init() {}
+    public static let `default` = ScanPolicy()
 
     public func decision(
-        checkpoint: Checkpoint?,
-        now: Date,
+        checkpoint: Checkpoint?, now: Date,
+        lastPublishedFullAt: Date? = nil, calendar: Calendar = .current,
         recoveryTrigger: RecoveryTrigger? = nil
     ) -> ScanDecision {
         if let recoveryTrigger { return .recovery(recoveryTrigger) }
-        guard let checkpoint else { return .initialFull }
-        if now.timeIntervalSince(checkpoint.lastSuccessfulFullScanAt) >= fullScanInterval {
-            return .scheduledFull
+        guard checkpoint != nil else { return .initialFull }
+        if let lastPublishedFullAt, lastPublishedFullAt <= now,
+            calendar.isDate(lastPublishedFullAt, inSameDayAs: now)
+        {
+            return .incremental
         }
-        return .incremental
+        return .scheduledFull
     }
-}
-
-public enum ScanPolicyError: Error, Equatable, Sendable {
-    case invalidFullScanInterval
 }

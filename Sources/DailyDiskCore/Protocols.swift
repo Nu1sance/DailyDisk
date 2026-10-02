@@ -251,6 +251,7 @@ public struct CanonicalAttributionBatch: Sendable {
 }
 
 public struct ScanCommit: Codable, Equatable, Sendable {
+    public let comparesSnapshots: Bool
     public let runID: ScanRun.ID
     public let runKind: ScanRun.Kind
     public let scope: StorageDomainScope
@@ -287,8 +288,14 @@ public struct ScanCommit: Codable, Equatable, Sendable {
             unreadablePathCount: 0,
             transientErrorCount: 0
         ),
-        scanErrors: [ScanErrorRecord] = []
+        scanErrors: [ScanErrorRecord] = [],
+        comparesSnapshots: Bool = false
     ) throws {
+        guard !comparesSnapshots || (runKind != .incremental && changes.allSatisfy { $0.source == .snapshotComparison })
+        else {
+            throw ModelValidationError.invalidScanCommit
+        }
+        self.comparesSnapshots = comparesSnapshots
         guard let scopedVolume = scope.volumes.first(where: { $0.id == volumeID }),
             checkpoint.volumeID == volumeID,
             checkpoint.eventStoreUUID == scopedVolume.eventStoreUUID,
@@ -402,6 +409,7 @@ public struct ScanCommit: Codable, Equatable, Sendable {
         case runKind
         case scope
         case volumeID
+        case comparesSnapshots
         case activatedGenerationID
         case previousCheckpoint
         case checkpoint
@@ -444,12 +452,14 @@ public struct ScanCommit: Codable, Equatable, Sendable {
                     unreadablePathCount: 0,
                     transientErrorCount: 0
                 ),
-            scanErrors: container.decodeIfPresent([ScanErrorRecord].self, forKey: .scanErrors) ?? []
+            scanErrors: container.decodeIfPresent([ScanErrorRecord].self, forKey: .scanErrors) ?? [],
+            comparesSnapshots: container.decodeIfPresent(Bool.self, forKey: .comparesSnapshots) ?? false
         )
     }
 }
 
 public struct ReportCommit: Codable, Equatable, Sendable {
+    public let publishedAt: Date
     public let runID: ScanRun.ID
     public let scope: StorageDomainScope
     public let changes: [ChangeRecord]
@@ -468,8 +478,11 @@ public struct ReportCommit: Codable, Equatable, Sendable {
         currentStorageSample: StorageSample,
         previousOverheadSample: DailyDiskOverheadSample?,
         currentOverheadSample: DailyDiskOverheadSample?,
-        report: DailyReport
+        report: DailyReport,
+        publishedAt: Date = Date()
     ) throws {
+        guard publishedAt.timeIntervalSince1970.isFinite else { throw ModelValidationError.invalidReportCommit }
+        self.publishedAt = publishedAt
         guard changes.allSatisfy({ $0.runID == runID }),
             report.runID == runID,
             report.storageDomainID == scope.domain.id
@@ -531,6 +544,7 @@ public struct ReportCommit: Codable, Equatable, Sendable {
         case previousOverheadSample
         case currentOverheadSample
         case report
+        case publishedAt
     }
 
     public init(from decoder: any Decoder) throws {
@@ -549,7 +563,8 @@ public struct ReportCommit: Codable, Equatable, Sendable {
                 DailyDiskOverheadSample.self,
                 forKey: .currentOverheadSample
             ),
-            report: container.decode(DailyReport.self, forKey: .report)
+            report: container.decode(DailyReport.self, forKey: .report),
+            publishedAt: container.decodeIfPresent(Date.self, forKey: .publishedAt) ?? Date()
         )
     }
 }
@@ -742,6 +757,10 @@ public protocol InventoryStoring: Sendable {
 
     /// Idempotently persists a report only after its referenced run ledger and
     /// samples are committed. `ReportCommit` proves it derives from that basis.
+    func deriveSnapshotChanges(
+        authoritative: InventoryMutationTarget, runID: ScanRun.ID, observer: any ScanWorkObserving
+    ) async throws -> [ChangeRecord]
+
     func commitReport(_ commit: ReportCommit) async throws
 
     func report(

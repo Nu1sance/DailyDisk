@@ -96,6 +96,7 @@ public struct LocalReportWriter: ReportWriting {
             "",
             "| Metric | Signed change |",
             "| --- | ---: |",
+            "| Snapshot comparison | \(bytes(accounting.snapshotComparedDelta)) |",
             "| Event-attributed | \(bytes(accounting.eventAttributedDelta)) |",
             "| Reconciliation correction | \(bytes(accounting.reconciliationCorrection)) |",
             "| Reconciled indexed | \(bytes(accounting.reconciledIndexedDelta)) |",

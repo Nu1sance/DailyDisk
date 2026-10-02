@@ -10,7 +10,7 @@ public struct DueTimeGate: Sendable {
     public let minute: Int
     public let calendar: Calendar
 
-    public init(hour: Int = 9, minute: Int = 0, calendar: Calendar = .current) throws {
+    public init(hour: Int = 5, minute: Int = 0, calendar: Calendar = .current) throws {
         guard (0..<24).contains(hour), (0..<60).contains(minute) else {
             throw DueTimeGateError.invalidTime
         }
@@ -49,6 +49,9 @@ public struct DueTimeGate: Sendable {
             return .due(scheduledFor: min(now, todayTarget))
         }
         let lastSuccessfulAt = lastSuccessfulAt!
+        if lastSuccessfulAt <= now, calendar.isDate(lastSuccessfulAt, inSameDayAs: now) {
+            return .notDue(nextScheduledAt: try nextDay(after: todayTarget))
+        }
         if now >= todayTarget {
             return lastSuccessfulAt < todayTarget
                 ? .due(scheduledFor: todayTarget)
@@ -57,7 +60,7 @@ public struct DueTimeGate: Sendable {
         guard let previousTarget = calendar.date(byAdding: .day, value: -1, to: todayTarget) else {
             throw DueTimeGateError.cannotResolveSchedule
         }
-        if lastSuccessfulAt < previousTarget {
+        if lastSuccessfulAt < calendar.startOfDay(for: previousTarget) {
             return .due(scheduledFor: previousTarget)
         }
         return .notDue(nextScheduledAt: todayTarget)

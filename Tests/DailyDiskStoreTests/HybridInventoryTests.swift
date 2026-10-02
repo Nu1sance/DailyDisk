@@ -152,3 +152,40 @@ func compactTransactionCrashRecovery() async throws {
     #expect(try db.scalarInt64("SELECT COUNT(*) FROM hybrid_canonical") == Int64(baseline.records.count))
     #expect(try await fixture.store.state(for: fixture.volume.id)?.checkpoint == baseline.checkpoint)
 }
+
+@Test("Identical compact objects and ordering skip updates while preserving membership counts")
+func compactNoopWrites() async throws {
+    let fixture = try await StoreFixture()
+    defer { fixture.removeFiles() }
+    let run = ScanRun(kind: .full, reason: .manual, status: .running, startedAt: Date())
+    try await fixture.store.begin(run: run)
+    let generation = try await fixture.store.createStagingGeneration(
+        volumeID: fixture.volume.id, runID: run.id, at: run.startedAt)
+    let db = try SQLiteDatabase(url: fixture.databaseURL)
+    let record = try fixture.record(path: "same", inode: 7, logicalBytes: 71, allocatedBytes: 512)
+    try db.execute(
+        """
+        CREATE TEMP TABLE update_audit(kind TEXT);
+        CREATE TEMP TRIGGER audit_object AFTER UPDATE ON hybrid_objects BEGIN
+          INSERT INTO update_audit VALUES('object'); END;
+        CREATE TEMP TRIGGER audit_order AFTER UPDATE ON hybrid_order BEGIN
+          INSERT INTO update_audit VALUES('order'); END;
+        """)
+    try db.transaction {
+        let writer = try HybridInventoryWriter(database: db, generationID: generation.id)
+        #expect(try writer.write(record))
+        #expect(try writer.write(record))
+    }
+    #expect(try db.scalarInt64("SELECT COUNT(*) FROM update_audit") == 0)
+    let changed = try fixture.record(path: "same", inode: 7, logicalBytes: 72, allocatedBytes: 1024)
+    try db.transaction {
+        let writer = try HybridInventoryWriter(database: db, generationID: generation.id)
+        #expect(try writer.write(changed))
+        let preserving = try HybridInventoryWriter(database: db, generationID: generation.id, ignoreExisting: true)
+        #expect(try !preserving.write(record))
+    }
+    #expect(try db.scalarInt64("SELECT COUNT(*) FROM update_audit WHERE kind='object'") == 1)
+    #expect(try db.scalarInt64("SELECT logical_bytes FROM hybrid_objects") == 72)
+    #expect(try db.scalarInt64("SELECT COUNT(*) FROM update_audit WHERE kind='order'") == 0)
+    #expect(try db.verifyHybridOrdering() == 0)
+}

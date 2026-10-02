@@ -1,6 +1,8 @@
+import Foundation
+
 public enum ScanExecutionOutcome: Sendable {
     case incremental(IncrementalScanOutcome)
-    case recoveryRequired(reasons: [String])
+    case recoveryRequired(reasons: [String], codes: [ScanProbeReasonCode], failedAttempt: UUID?, failedRun: UUID?)
 }
 
 /// Entry point shared by manual and scheduled execution. Full/recovery policy
@@ -41,7 +43,10 @@ public struct ScanCoordinator: Sendable {
                 )
             )
         } catch IncrementalScanError.recoveryRequired(let reasons) {
-            return .recoveryRequired(reasons: reasons)
+            let evidence = ScanProbe.context.trace?.snapshot
+            return .recoveryRequired(
+                reasons: reasons, codes: evidence?.codes ?? [.unknown],
+                failedAttempt: evidence?.attempt, failedRun: evidence?.run)
         }
     }
 }

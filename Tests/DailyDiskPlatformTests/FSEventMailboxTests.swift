@@ -163,3 +163,46 @@ func unsortedCallbackIsFullyRetained() {
     mailbox.append(pathBytes: Data("/stale".utf8), flagsRawValue: FileSystemEventFlags.modified.rawValue, eventID: 9)
     #expect(mailbox.assessment(throughSequence: mailbox.latestSequence).trust == .fullScanRequired)
 }
+
+@Test("Fatal mailbox trust stops cooperative mutation work before HistoryDone")
+func mailboxFastFailureDuringConsumption() async throws {
+    let mailbox = FSEventMailbox(volumeID: .init("synthetic"), previousEventID: 10, maximumBufferedEvents: 2)
+    let calls = FastFailureCounter()
+    let verify: @Sendable () throws -> Void = { try mailbox.checkReplayTrust() }
+    do {
+        try await EventReplayGuard.$check.withValue(verify) {
+            let observer = EventReplayGuard.observing(TaskOnlyScanWorkObserver())
+            for id in 11...15 {
+                try await observer.checkpoint()
+                await calls.increment()
+                // Simulate producer pressure while metadata/subtree work is in flight.
+                for n in 0..<3 {
+                    mailbox.append(pathBytes: Data("/p\(n)".utf8), flagsRawValue: 0, eventID: UInt64(id + n))
+                }
+            }
+        }
+        Issue.record("Untrusted replay continued")
+    } catch let error as EventReplayInvalidated {
+        #expect(error.reasons == ["DailyDisk FSEvents buffer overflowed"])
+    }
+    #expect(await calls.value == 1)
+    #expect(mailbox.historyBoundarySequence == nil)
+    #expect(mailbox.probeSummary["buffered"] == "2")
+}
+
+@Test("Subtree requests remain usable but live loss aborts pending history")
+func mailboxFastFailureRespectsTrustKinds() throws {
+    let mailbox = FSEventMailbox(volumeID: .init("synthetic"), previousEventID: 10, maximumBufferedEvents: 4)
+    mailbox.append(
+        pathBytes: Data("/dir".utf8), flagsRawValue: FileSystemEventFlags.mustScanSubdirectories.rawValue, eventID: 11)
+    try mailbox.checkReplayTrust()
+    mailbox.append(pathBytes: Data("/".utf8), flagsRawValue: FileSystemEventFlags.historyDone.rawValue, eventID: 0)
+    mailbox.append(
+        pathBytes: Data("/dir".utf8), flagsRawValue: FileSystemEventFlags.kernelDropped.rawValue, eventID: 12)
+    #expect(throws: EventReplayInvalidated.self) { try mailbox.checkReplayTrust() }
+}
+
+private actor FastFailureCounter {
+    var value = 0
+    func increment() { value += 1 }
+}

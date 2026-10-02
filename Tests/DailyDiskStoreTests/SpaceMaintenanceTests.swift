@@ -315,3 +315,24 @@ func retirementUsesActivationTime() async throws {
     #expect(retired >= started.timeIntervalSince1970)
     #expect(retired <= Date().timeIntervalSince1970)
 }
+
+@Test("Lost post-commit completion marker does not roll back inventory or invent daily success")
+func missingFullCompletionMarker() async throws {
+    let fixture = try await StoreFixture()
+    defer { fixture.removeFiles() }
+    do {
+        let db = try SQLiteDatabase(url: fixture.databaseURL)
+        try db.execute(
+            """
+            CREATE TRIGGER fail_completion BEFORE UPDATE OF inventory_completed_at ON scan_runs
+            BEGIN SELECT RAISE(FAIL, 'synthetic completion marker failure'); END;
+            """)
+    }
+    let baseline = try await establishBaseline(in: fixture)
+    #expect(try await fixture.store.state(for: fixture.volume.id)?.checkpoint == baseline.checkpoint)
+    #expect(try await fixture.store.scanRun(id: baseline.run.id)?.status == .succeeded)
+    try await publishBaseline(baseline, in: fixture)
+    let reader = try SQLiteReportStore(databaseURL: fixture.databaseURL)
+    #expect(try await reader.report(runID: baseline.run.id) != nil)
+    #expect(try await reader.latestSuccessfulFullReportDate(for: fixture.scope.domain.id) == nil)
+}

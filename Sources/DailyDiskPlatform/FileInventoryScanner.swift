@@ -12,7 +12,7 @@ public struct FileInventoryScannerConfiguration: Sendable {
     public let validateMountIdentity: Bool
 
     public init(
-        batchSize: Int = 512,
+        batchSize: Int = 1_024,
         managedAbsolutePaths: [String] = FileInventoryScannerConfiguration.defaultManagedPaths,
         maximumRecordedErrors: Int = 10_000,
         maximumUnreadablePaths: UInt64 = 10_000,

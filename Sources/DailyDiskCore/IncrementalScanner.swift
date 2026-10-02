@@ -85,9 +85,11 @@ public struct IncrementalScanner: Sendable {
         guard let state = try await store.state(for: volume.id),
             let eventStoreUUID = state.checkpoint.eventStoreUUID
         else {
+            ScanProbe.emit(.rejection, reason: .missingCheckpoint)
             throw IncrementalScanError.missingCheckpoint
         }
         guard state.checkpoint.topologyFingerprint == volume.topologyFingerprint else {
+            ScanProbe.emit(.rejection, reason: .topologyChanged)
             throw IncrementalScanError.recoveryRequired(["Volume topology fingerprint changed"])
         }
 
@@ -100,139 +102,177 @@ public struct IncrementalScanner: Sendable {
             status: .running,
             startedAt: startedAt
         )
-        try await store.begin(run: run)
-        try await progressTracker.bindRun(run.id)
-        let target = InventoryMutationTarget.expectedActive(volumeID: volume.id)
-        let mutator = IncrementalInventoryMutator(
-            store: store,
-            metadataReader: metadataReader,
-            subtreeScanner: subtreeScanner
-        )
-        let progress = IncrementalProgress()
-        var session: (any EventHistorySession)?
-
-        do {
-            let openedSession = try await eventReader.openSession(
-                volume: volume,
-                checkpoint: EventStreamCheckpoint(
-                    eventStoreUUID: eventStoreUUID,
-                    lastEventID: state.checkpoint.lastCommittedEventID
-                )
+        return try await ScanProbe.$context.withValue(ScanProbe.context.attempt(run.id, role: "incremental")) {
+            ScanProbe.emit(.attemptStarted)
+            ScanProbe.checkpoint(.checkpointRead, state.checkpoint)
+            try await store.begin(run: run)
+            try await progressTracker.bindRun(run.id)
+            let target = InventoryMutationTarget.expectedActive(volumeID: volume.id)
+            let mutator = IncrementalInventoryMutator(
+                store: store,
+                metadataReader: metadataReader,
+                subtreeScanner: subtreeScanner
             )
-            session = openedSession
+            let progress = IncrementalProgress()
+            var session: (any EventHistorySession)?
 
-            try await progressTracker.transition(to: .replayingEvents, mode: .incremental)
-            let rawHistoryFence = try await openedSession.replayHistoricalEvents(
-                observer: progressTracker
-            ) { batch in
-                let result = try await mutator.apply(
-                    batch: batch,
+            do {
+                let openedSession = try await eventReader.openSession(
                     volume: volume,
+                    checkpoint: EventStreamCheckpoint(
+                        eventStoreUUID: eventStoreUUID,
+                        lastEventID: state.checkpoint.lastCommittedEventID
+                    )
+                )
+                session = openedSession
+
+                try await progressTracker.transition(to: .replayingEvents, mode: .incremental)
+                let rawHistoryFence = try await openedSession.replayHistoricalEvents(
+                    observer: progressTracker
+                ) { batch in
+                    let result = try await mutator.apply(
+                        batch: batch,
+                        volume: volume,
+                        target: target,
+                        runID: run.id,
+                        observer: progressTracker
+                    )
+                    await progress.record(result)
+                }
+                _ = await progress.normalize(fence: rawHistoryFence)
+                try await requireTrusted(progress)
+
+                try await progressTracker.transition(to: .catchingUpEvents, mode: .incremental)
+                let rawLiveFence = try await openedSession.flushLiveEvents(
+                    observer: progressTracker
+                ) { batch in
+                    let result = try await mutator.apply(
+                        batch: batch,
+                        volume: volume,
+                        target: target,
+                        runID: run.id,
+                        observer: progressTracker
+                    )
+                    await progress.record(result)
+                }
+                let liveFence = await progress.normalize(fence: rawLiveFence)
+                try await requireTrusted(progress)
+
+                try await progressTracker.transition(to: .sealingInventory, mode: .incremental)
+                try await store.finalizeCanonicalAttribution(
+                    target: target,
+                    runID: run.id,
+                    observer: progressTracker,
+                    consume: { _ in }
+                )
+                let changes = try await store.deriveIncrementalChanges(
                     target: target,
                     runID: run.id,
                     observer: progressTracker
                 )
-                await progress.record(result)
-            }
-            _ = await progress.normalize(fence: rawHistoryFence)
-            try await requireTrusted(progress)
-
-            try await progressTracker.transition(to: .catchingUpEvents, mode: .incremental)
-            let rawLiveFence = try await openedSession.flushLiveEvents(
-                observer: progressTracker
-            ) { batch in
-                let result = try await mutator.apply(
-                    batch: batch,
-                    volume: volume,
-                    target: target,
+                try await progressTracker.transition(to: .collectingDiagnostics, mode: .incremental)
+                let diagnosticSamples = await collectDiagnosticSamples(
+                    scope: scope,
                     runID: run.id,
-                    observer: progressTracker
+                    progress: progress
                 )
-                await progress.record(result)
-            }
-            let liveFence = await progress.normalize(fence: rawLiveFence)
-            try await requireTrusted(progress)
-
-            try await progressTracker.transition(to: .sealingInventory, mode: .incremental)
-            try await store.finalizeCanonicalAttribution(
-                target: target,
-                runID: run.id,
-                observer: progressTracker,
-                consume: { _ in }
-            )
-            let changes = try await store.deriveIncrementalChanges(
-                target: target,
-                runID: run.id,
-                observer: progressTracker
-            )
-            try await progressTracker.transition(to: .collectingDiagnostics, mode: .incremental)
-            let diagnosticSamples = await collectDiagnosticSamples(
-                scope: scope,
-                runID: run.id,
-                progress: progress
-            )
-            let sample = try await diskUsageSampler.sample(storageDomain: scope.domain)
-            let finishedAt = await clock.now()
-            guard let committedEventStoreUUID = liveFence.eventStoreUUID else {
-                throw IncrementalScanError.recoveryRequired(["FSEvents journal identity disappeared"])
-            }
-            let persistedErrors = await progress.scanErrors
-            let affectedPathCount = await progress.affectedPathCount
-            let persistedCoverage = ScanCoverage(
-                visitedPathCount: UInt64(max(0, affectedPathCount)),
-                indexedObjectCount: 0,
-                unreadablePathCount: UInt64(persistedErrors.filter { $0.kind.preservesOpaqueInventory }.count),
-                transientErrorCount: UInt64(
-                    persistedErrors.filter { $0.kind == .disappearedDuringScan }.count
+                let sample = try await diskUsageSampler.sample(storageDomain: scope.domain)
+                let finishedAt = await clock.now()
+                guard let committedEventStoreUUID = liveFence.eventStoreUUID else {
+                    ScanProbe.emit(.rejection, reason: .journalUnavailable)
+                    throw IncrementalScanError.recoveryRequired(["FSEvents journal identity disappeared"])
+                }
+                let persistedErrors = await progress.scanErrors
+                let affectedPathCount = await progress.affectedPathCount
+                let persistedCoverage = ScanCoverage(
+                    visitedPathCount: UInt64(max(0, affectedPathCount)),
+                    indexedObjectCount: 0,
+                    unreadablePathCount: UInt64(persistedErrors.filter { $0.kind.preservesOpaqueInventory }.count),
+                    transientErrorCount: UInt64(
+                        persistedErrors.filter { $0.kind == .disappearedDuringScan }.count
+                    )
                 )
-            )
-            let checkpoint = Checkpoint(
-                volumeID: volume.id,
-                eventStoreUUID: committedEventStoreUUID,
-                lastCommittedEventID: liveFence.highestFullyDeliveredEventID,
-                activeGenerationID: state.activeGeneration.id,
-                topologyFingerprint: volume.topologyFingerprint,
-                lastSuccessfulIncrementalAt: finishedAt,
-                lastSuccessfulFullScanAt: state.checkpoint.lastSuccessfulFullScanAt
-            )
-            let commit = try ScanCommit(
-                runID: run.id,
-                runKind: .incremental,
-                scope: scope,
-                volumeID: volume.id,
-                activatedGenerationID: nil,
-                previousCheckpoint: state.checkpoint,
-                checkpoint: checkpoint,
-                eventFence: liveFence,
-                changes: changes,
-                storageSamples: [sample],
-                snapshotSamples: diagnosticSamples.snapshots,
-                snapshotObservedVolumeIDs: diagnosticSamples.observedVolumeIDs,
-                overheadSample: diagnosticSamples.overhead,
-                coverage: persistedCoverage,
-                scanErrors: persistedErrors
-            )
-            try await progressTracker.transition(to: .committing, mode: .incremental)
-            try await store.commit(commit, finishedAt: finishedAt)
-            return IncrementalScanOutcome(
-                runID: run.id,
-                checkpoint: checkpoint,
-                changes: changes,
-                storageSample: sample,
-                affectedPathCount: affectedPathCount,
-                snapshotSamples: diagnosticSamples.snapshots,
-                snapshotObservedVolumeIDs: diagnosticSamples.observedVolumeIDs,
-                overheadSample: diagnosticSamples.overhead,
-                scanErrors: persistedErrors
-            )
-        } catch {
-            if let session { await session.stop() }
-            let finishedAt = await clock.now()
-            if isScanCancellation(error) {
-                try? await progressTracker.transition(to: .cancelling, mode: .incremental)
+                let checkpoint = Checkpoint(
+                    volumeID: volume.id,
+                    eventStoreUUID: committedEventStoreUUID,
+                    lastCommittedEventID: liveFence.highestFullyDeliveredEventID,
+                    activeGenerationID: state.activeGeneration.id,
+                    topologyFingerprint: volume.topologyFingerprint,
+                    lastSuccessfulIncrementalAt: finishedAt,
+                    lastSuccessfulFullScanAt: state.checkpoint.lastSuccessfulFullScanAt
+                )
+                let commit = try ScanCommit(
+                    runID: run.id,
+                    runKind: .incremental,
+                    scope: scope,
+                    volumeID: volume.id,
+                    activatedGenerationID: nil,
+                    previousCheckpoint: state.checkpoint,
+                    checkpoint: checkpoint,
+                    eventFence: liveFence,
+                    changes: changes,
+                    storageSamples: [sample],
+                    snapshotSamples: diagnosticSamples.snapshots,
+                    snapshotObservedVolumeIDs: diagnosticSamples.observedVolumeIDs,
+                    overheadSample: diagnosticSamples.overhead,
+                    coverage: persistedCoverage,
+                    scanErrors: persistedErrors
+                )
+                try await progressTracker.transition(to: .committing, mode: .incremental)
+                ScanProbe.checkpoint(.commitProposed, commit.checkpoint)
+                try await store.commit(commit, finishedAt: finishedAt)
+                if ScanProbe.context.recorder != nil {
+                    ScanProbe.checkpoint(.commitSucceeded, (try? await store.state(for: volume.id))?.checkpoint)
+                }
+                return IncrementalScanOutcome(
+                    runID: run.id,
+                    checkpoint: checkpoint,
+                    changes: changes,
+                    storageSample: sample,
+                    affectedPathCount: affectedPathCount,
+                    snapshotSamples: diagnosticSamples.snapshots,
+                    snapshotObservedVolumeIDs: diagnosticSamples.observedVolumeIDs,
+                    overheadSample: diagnosticSamples.overhead,
+                    scanErrors: persistedErrors
+                )
+            } catch {
+                let error: any Error =
+                    (error as? EventReplayInvalidated).map {
+                        IncrementalScanError.recoveryRequired($0.reasons)
+                    } ?? error
+                ScanProbe.emit(
+                    .attemptFailed,
+                    fields: [
+                        "cancelled": String(isScanCancellation(error)),
+                        "failureType": String(reflecting: type(of: error)),
+                    ])
+                if let session { await session.stop() }
+                await ScanProbe.context.recorder?.flush()
+                let finishedAt = await clock.now()
+                if isScanCancellation(error) {
+                    try? await progressTracker.transition(to: .cancelling, mode: .incremental)
+                    do {
+                        try await store.interrupt(runID: run.id, finishedAt: finishedAt)
+                        try? await progressTracker.transition(to: .cancelled, mode: .incremental)
+                    } catch let cleanupError {
+                        throw IncrementalScanError.cleanupFailed(
+                            primary: String(describing: error),
+                            cleanup: String(describing: cleanupError)
+                        )
+                    }
+                    throw error
+                }
+                try? await progressTracker.transition(to: .cleaningUpFailedRun, mode: .incremental)
+                let record = ScanErrorRecord(
+                    runID: run.id,
+                    volumeID: volume.id,
+                    kind: error is IncrementalScanError ? .eventHistory : .other,
+                    path: nil,
+                    errorCode: nil,
+                    message: String(describing: error)
+                )
                 do {
-                    try await store.interrupt(runID: run.id, finishedAt: finishedAt)
-                    try? await progressTracker.transition(to: .cancelled, mode: .incremental)
+                    try await store.fail(runID: run.id, errors: [record], finishedAt: finishedAt)
                 } catch let cleanupError {
                     throw IncrementalScanError.cleanupFailed(
                         primary: String(describing: error),
@@ -241,24 +281,6 @@ public struct IncrementalScanner: Sendable {
                 }
                 throw error
             }
-            try? await progressTracker.transition(to: .cleaningUpFailedRun, mode: .incremental)
-            let record = ScanErrorRecord(
-                runID: run.id,
-                volumeID: volume.id,
-                kind: error is IncrementalScanError ? .eventHistory : .other,
-                path: nil,
-                errorCode: nil,
-                message: String(describing: error)
-            )
-            do {
-                try await store.fail(runID: run.id, errors: [record], finishedAt: finishedAt)
-            } catch let cleanupError {
-                throw IncrementalScanError.cleanupFailed(
-                    primary: String(describing: error),
-                    cleanup: String(describing: cleanupError)
-                )
-            }
-            throw error
         }
     }
 
@@ -316,6 +338,9 @@ public struct IncrementalScanner: Sendable {
     private func requireTrusted(_ progress: IncrementalProgress) async throws {
         let assessment = await progress.assessment
         guard assessment.trust == .trusted else {
+            if ScanProbe.context.trace?.snapshot.codes.isEmpty != false {
+                ScanProbe.emit(.rejection, reason: .unknown)
+            }
             throw IncrementalScanError.recoveryRequired(assessment.reasons)
         }
     }

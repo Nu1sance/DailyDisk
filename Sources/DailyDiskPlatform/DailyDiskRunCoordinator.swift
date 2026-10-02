@@ -3,7 +3,7 @@ import DailyDiskStore
 import Foundation
 
 public protocol LatestReportReading: Sendable {
-    func latestSuccessfulReportDate(
+    func latestSuccessfulFullReportDate(
         for storageDomainID: StorageDomain.ID
     ) async throws -> Date?
 }
@@ -15,13 +15,7 @@ private struct DomainRunResult: Sendable {
     let usedProgressTracker: Bool
 }
 
-extension SQLiteReportStore: LatestReportReading {
-    public func latestSuccessfulReportDate(
-        for storageDomainID: StorageDomain.ID
-    ) async throws -> Date? {
-        try await latestReport(for: storageDomainID)?.generatedAt
-    }
-}
+extension SQLiteReportStore: LatestReportReading {}
 
 public enum DailyDiskCoordinatorMode: Sendable {
     case scheduled
@@ -128,165 +122,186 @@ public struct DailyDiskRunCoordinator: Sendable {
             startedAt = await clock.now()
         }
         let requestID = suppliedRequestID ?? mode.requestID
-        do {
-            let tracker = try await progressFactory(requestID, mode.trigger, startedAt, 0)
-            let initialProgress = try await tracker.currentSnapshot()
-            let resumingPublication = [.committing, .publishingReport, .notifying, .applyingRetention]
-                .contains(initialProgress.phase)
-            if !resumingPublication {
-                try await tracker.transition(to: .preparing, mode: nil)
-            }
-            try await store.prepare()
-            let hasInterruptedRuns = try await !store.activeRuns().isEmpty
-            let recoveringCommit = resumingPublication && hasInterruptedRuns
-            if recoveringCommit {
-                // The persisted phase can precede the SQLite COMMIT. A new
-                // writer lease plus a still-running database run means that
-                // transaction was rolled back, not that a report is pending.
-                // Show cleanup before restarting inventory work for this request.
-                try await tracker.transition(to: .cleaningUpFailedRun, mode: nil)
-            } else if !resumingPublication, hasInterruptedRuns {
-                try await tracker.transition(to: .recoveringInterruptedRun, mode: nil)
-            }
-            try await store.recoverInterruptedRuns(at: startedAt)
-            if recoveringCommit {
-                try await tracker.transition(to: .preparing, mode: nil)
-            }
-            if !resumingPublication || recoveringCommit {
-                if let spaceMaintenance {
-                    if try await tracker.currentSnapshot().phase != .preparing {
-                        try await tracker.transition(to: .preparing, mode: nil)
-                    }
-                    try await spaceMaintenance(tracker)
+        var probe = ScanProbe.context
+        probe.requestID = requestID
+        probe.trace = ScanProbeTrace()
+        let summary = await ScanProbe.$context.withValue(probe) {
+            ScanProbe.emit(.requestStarted, fields: ["trigger": mode.trigger.rawValue])
+            do {
+                let tracker = try await progressFactory(requestID, mode.trigger, startedAt, 0)
+                let initialProgress = try await tracker.currentSnapshot()
+                let resumingPublication = [.committing, .publishingReport, .notifying, .applyingRetention]
+                    .contains(initialProgress.phase)
+                if !resumingPublication {
+                    try await tracker.transition(to: .preparing, mode: nil)
                 }
-                try await tracker.transition(to: .discoveringStorage, mode: nil)
-            }
-            let topology = try await discovery.discoverInternalAPFSVolumes()
-            // Metrics-only containers have no inventory work. Do not move the
-            // progress tracker to another domain after a successful commit.
-            let inventoryDomainIDs = Set(topology.volumes.filter { $0.inventoryMode == .full }.map(\.storageDomainID))
-            let domains = topology.domains.filter { inventoryDomainIDs.contains($0.id) }
-            var completedDomains = 0
-            var failedDomains = 0
-            var reportRunIDs: [UUID] = []
-
-            for (index, domain) in domains.enumerated() {
-                do {
-                    try await tracker.beginDomain(ordinal: index + 1, count: domains.count)
-                    if let domainResult = try await runDomain(
-                        domain: domain,
-                        topology: topology,
-                        mode: mode,
-                        progressTracker: tracker
-                    ) {
-                        if domainResult.shouldNotify, let report = domainResult.report,
-                            let scheduledReportHandler
-                        {
-                            if domainResult.usedProgressTracker {
-                                try? await tracker.transition(to: .notifying, mode: nil)
-                            }
-                            await scheduledReportHandler(report)
+                try await store.prepare()
+                let hasInterruptedRuns = try await !store.activeRuns().isEmpty
+                let recoveringCommit = resumingPublication && hasInterruptedRuns
+                ScanProbe.emit(
+                    .recoveryResume,
+                    fields: [
+                        "publication": String(resumingPublication),
+                        "interruptedRuns": String(hasInterruptedRuns),
+                    ])
+                if recoveringCommit {
+                    // The persisted phase can precede the SQLite COMMIT. A new
+                    // writer lease plus a still-running database run means that
+                    // transaction was rolled back, not that a report is pending.
+                    // Show cleanup before restarting inventory work for this request.
+                    try await tracker.transition(to: .cleaningUpFailedRun, mode: nil)
+                } else if !resumingPublication, hasInterruptedRuns {
+                    try await tracker.transition(to: .recoveringInterruptedRun, mode: nil)
+                }
+                try await store.recoverInterruptedRuns(at: startedAt)
+                if recoveringCommit {
+                    try await tracker.transition(to: .preparing, mode: nil)
+                }
+                if !resumingPublication || recoveringCommit {
+                    if let spaceMaintenance {
+                        if try await tracker.currentSnapshot().phase != .preparing {
+                            try await tracker.transition(to: .preparing, mode: nil)
                         }
-                        completedDomains += 1
-                        reportRunIDs.append(domainResult.runID.rawValue)
+                        try await spaceMaintenance(tracker)
                     }
-                } catch {
-                    if isScanCancellation(error) {
-                        return try DailyDiskRunSummary(
-                            requestID: requestID,
-                            trigger: mode.trigger,
-                            terminalState: .cancelled,
-                            startedAt: startedAt,
-                            finishedAt: await clock.now(),
-                            completedDomainCount: completedDomains,
-                            failedDomainCount: 0,
-                            reportRunIDs: reportRunIDs
-                        )
-                    }
-                    failedDomains += 1
-                    await errorHandler?("domain-run-failed", error)
+                    try await tracker.transition(to: .discoveringStorage, mode: nil)
                 }
-            }
+                let topology = try await discovery.discoverInternalAPFSVolumes()
+                // Metrics-only containers have no inventory work. Do not move the
+                // progress tracker to another domain after a successful commit.
+                let inventoryDomainIDs = Set(
+                    topology.volumes.filter { $0.inventoryMode == .full }.map(\.storageDomainID))
+                let domains = topology.domains.filter { inventoryDomainIDs.contains($0.id) }
+                var completedDomains = 0
+                var failedDomains = 0
+                var reportRunIDs: [UUID] = []
 
-            if let retentionHandler {
-                if completedDomains > 0 {
-                    try? await tracker.transition(to: .applyingRetention, mode: nil)
+                for (index, domain) in domains.enumerated() {
+                    do {
+                        try await tracker.beginDomain(ordinal: index + 1, count: domains.count)
+                        if let domainResult = try await runDomain(
+                            domain: domain,
+                            topology: topology,
+                            mode: mode,
+                            progressTracker: tracker
+                        ) {
+                            if domainResult.shouldNotify, let report = domainResult.report,
+                                let scheduledReportHandler
+                            {
+                                if domainResult.usedProgressTracker {
+                                    try? await tracker.transition(to: .notifying, mode: nil)
+                                }
+                                await scheduledReportHandler(report)
+                            }
+                            completedDomains += 1
+                            reportRunIDs.append(domainResult.runID.rawValue)
+                        }
+                    } catch {
+                        if isScanCancellation(error) {
+                            return try DailyDiskRunSummary(
+                                requestID: requestID,
+                                trigger: mode.trigger,
+                                terminalState: .cancelled,
+                                startedAt: startedAt,
+                                finishedAt: await clock.now(),
+                                completedDomainCount: completedDomains,
+                                failedDomainCount: 0,
+                                reportRunIDs: reportRunIDs
+                            )
+                        }
+                        failedDomains += 1
+                        await errorHandler?("domain-run-failed", error)
+                    }
                 }
-                do {
-                    try await retentionHandler()
-                } catch {
-                    failedDomains += 1
-                    await errorHandler?("retention-failed", error)
+
+                if let retentionHandler {
+                    if completedDomains > 0 {
+                        try? await tracker.transition(to: .applyingRetention, mode: nil)
+                    }
+                    do {
+                        try await retentionHandler()
+                    } catch {
+                        failedDomains += 1
+                        await errorHandler?("retention-failed", error)
+                    }
                 }
-            }
-            let finishedAt = await clock.now()
-            if failedDomains > 0 {
-                return try DailyDiskRunSummary(
-                    requestID: requestID,
-                    trigger: mode.trigger,
-                    terminalState: .failed,
-                    startedAt: startedAt,
-                    finishedAt: finishedAt,
-                    completedDomainCount: completedDomains,
-                    failedDomainCount: failedDomains,
-                    reportRunIDs: reportRunIDs,
-                    errorCategory: .unknown
-                )
-            }
-            if completedDomains == 0 {
-                if case .manual = mode {
+                let finishedAt = await clock.now()
+                if failedDomains > 0 {
                     return try DailyDiskRunSummary(
                         requestID: requestID,
                         trigger: mode.trigger,
                         terminalState: .failed,
                         startedAt: startedAt,
                         finishedAt: finishedAt,
-                        completedDomainCount: 0,
-                        failedDomainCount: 1,
-                        reportRunIDs: [],
-                        errorCategory: .storageTopology
+                        completedDomainCount: completedDomains,
+                        failedDomainCount: failedDomains,
+                        reportRunIDs: reportRunIDs,
+                        errorCategory: .unknown
                     )
                 }
+                if completedDomains == 0 {
+                    if case .manual = mode {
+                        return try DailyDiskRunSummary(
+                            requestID: requestID,
+                            trigger: mode.trigger,
+                            terminalState: .failed,
+                            startedAt: startedAt,
+                            finishedAt: finishedAt,
+                            completedDomainCount: 0,
+                            failedDomainCount: 1,
+                            reportRunIDs: [],
+                            errorCategory: .storageTopology
+                        )
+                    }
+                    return try DailyDiskRunSummary(
+                        requestID: requestID,
+                        trigger: mode.trigger,
+                        terminalState: .skippedNotDue,
+                        startedAt: startedAt,
+                        finishedAt: finishedAt,
+                        completedDomainCount: 0,
+                        failedDomainCount: 0,
+                        reportRunIDs: []
+                    )
+                }
+                try? await tracker.transition(to: .completed, mode: nil)
+                let completedAt = max(finishedAt, await clock.now())
                 return try DailyDiskRunSummary(
                     requestID: requestID,
                     trigger: mode.trigger,
-                    terminalState: .skippedNotDue,
+                    terminalState: .succeeded,
                     startedAt: startedAt,
-                    finishedAt: finishedAt,
-                    completedDomainCount: 0,
+                    finishedAt: completedAt,
+                    completedDomainCount: completedDomains,
                     failedDomainCount: 0,
-                    reportRunIDs: []
+                    reportRunIDs: reportRunIDs
+                )
+            } catch {
+                await errorHandler?("run-failed", error)
+                return try! DailyDiskRunSummary(
+                    requestID: requestID,
+                    trigger: mode.trigger,
+                    terminalState: isScanCancellation(error) ? .cancelled : .failed,
+                    startedAt: startedAt,
+                    finishedAt: max(startedAt, await clock.now()),
+                    completedDomainCount: 0,
+                    failedDomainCount: isScanCancellation(error) ? 0 : 1,
+                    reportRunIDs: [],
+                    errorCategory: isScanCancellation(error)
+                        ? nil
+                        : error is WriterLeaseError
+                            ? .writerBusy : .unknown
                 )
             }
-            try? await tracker.transition(to: .completed, mode: nil)
-            let completedAt = max(finishedAt, await clock.now())
-            return try DailyDiskRunSummary(
-                requestID: requestID,
-                trigger: mode.trigger,
-                terminalState: .succeeded,
-                startedAt: startedAt,
-                finishedAt: completedAt,
-                completedDomainCount: completedDomains,
-                failedDomainCount: 0,
-                reportRunIDs: reportRunIDs
-            )
-        } catch {
-            await errorHandler?("run-failed", error)
-            return try! DailyDiskRunSummary(
-                requestID: requestID,
-                trigger: mode.trigger,
-                terminalState: isScanCancellation(error) ? .cancelled : .failed,
-                startedAt: startedAt,
-                finishedAt: max(startedAt, await clock.now()),
-                completedDomainCount: 0,
-                failedDomainCount: isScanCancellation(error) ? 0 : 1,
-                reportRunIDs: [],
-                errorCategory: isScanCancellation(error)
-                    ? nil
-                    : error is WriterLeaseError
-                        ? .writerBusy : .unknown
-            )
         }
+        probe.emit(
+            .requestFinished,
+            fields: [
+                "terminalState": summary.terminalState.rawValue,
+                "completedDomains": String(summary.completedDomainCount),
+                "failedDomains": String(summary.failedDomainCount),
+            ])
+        return summary
     }
 
     private func runDomain(
@@ -321,6 +336,7 @@ public struct DailyDiskRunCoordinator: Sendable {
 
         var recoveredResult: DomainRunResult?
         if let basis = try await store.latestUnreportedBasis(storageDomainID: domain.id) {
+            ScanProbe.emit(.recoveryResume, fields: ["pendingReportRun": basis.runID.rawValue.uuidString])
             let originalRun = try await store.scanRun(id: basis.runID)
             let resumesCurrentManualRun: Bool
             if case .manual(_, _, let resumedRunID) = mode {
@@ -357,14 +373,12 @@ public struct DailyDiskRunCoordinator: Sendable {
             }
         }
 
+        let lastPublishedFullAt = try await reportReader.latestSuccessfulFullReportDate(for: domain.id)
         if case .scheduled = mode {
-            let latestReportDate = try await reportReader.latestSuccessfulReportDate(
-                for: domain.id
-            )
             guard
                 case .due = try dueTimeGate.decision(
                     now: await clock.now(),
-                    lastSuccessfulAt: latestReportDate
+                    lastSuccessfulAt: lastPublishedFullAt
                 )
             else {
                 return recoveredResult
@@ -395,14 +409,36 @@ public struct DailyDiskRunCoordinator: Sendable {
 
         let reportResult: ReportGenerationResult
         let policyDecision: ScanDecision
+        var policyTime: Date?
         if case .manual(_, .fullReconciliation, _) = mode {
             policyDecision = state == nil ? .initialFull : .scheduledFull
         } else {
+            let now = await clock.now()
+            policyTime = now
             policyDecision = scanPolicy.decision(
-                checkpoint: state?.checkpoint,
-                now: await clock.now()
+                checkpoint: state?.checkpoint, now: now, lastPublishedFullAt: lastPublishedFullAt,
+                calendar: dueTimeGate.calendar
             )
         }
+        ScanProbe.checkpoint(.checkpointRead, state?.checkpoint)
+        let selection: String
+        if case .manual(_, .fullReconciliation, _) = mode {
+            selection = "forcedFull"
+        } else {
+            switch policyDecision {
+            case .initialFull: selection = "initialFull"
+            case .scheduledFull: selection = "dailyFull"
+            case .incremental: selection = "incremental"
+            case .recovery: selection = "recovery"
+            }
+        }
+        ScanProbe.emit(
+            .policyDecision,
+            fields: [
+                "selection": selection,
+                "lastPublishedFullUnix": lastPublishedFullAt.map { String($0.timeIntervalSince1970) } ?? "none",
+                "nowUnix": policyTime.map { String($0.timeIntervalSince1970) } ?? "notEvaluated",
+            ])
         switch policyDecision {
         case .initialFull:
             let outcome = try await fullCoordinator.run(
@@ -421,7 +457,7 @@ public struct DailyDiskRunCoordinator: Sendable {
             let outcome = try await fullCoordinator.run(
                 volume: volume,
                 scope: scope,
-                mode: .scheduled,
+                mode: .daily,
                 trigger: trigger,
                 progressTracker: progressTracker
             )
@@ -443,7 +479,17 @@ public struct DailyDiskRunCoordinator: Sendable {
                     scope: scope,
                     progressTracker: progressTracker
                 )
-            case .recoveryRequired:
+            case .recoveryRequired(let reasons, let codes, let failedAttempt, let failedRun):
+                // Exact typed causes have already been emitted at their source; preserve
+                // this recovery boundary without logging arbitrary display/path text.
+                var recoveryProbe = ScanProbe.context
+                recoveryProbe.attemptID = failedAttempt
+                recoveryProbe.runID = failedRun
+                var evidence = [
+                    "reasonCount": String(reasons.count), "firstReason": codes.first?.rawValue ?? "unknown",
+                ]
+                for (index, code) in codes.enumerated() { evidence["cause\(index)"] = code.rawValue }
+                recoveryProbe.emit(.recoverySelected, fields: evidence)
                 let outcome = try await fullCoordinator.run(
                     volume: volume,
                     scope: scope,

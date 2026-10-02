@@ -67,6 +67,22 @@ public final class DatabaseResetLease: @unchecked Sendable {
 }
 
 public actor SQLiteReportStore {
+    /// A full only satisfies daily work after its report was durably published.
+    /// Its day is the actual inventory completion day, not a delayed publication day.
+    /// Query full/recovery rows, not the latest run: later failures or increments
+    /// must not erase a successful full.
+    public func latestSuccessfulFullReportDate(for storageDomainID: StorageDomain.ID) throws -> Date? {
+        let statement = try database.prepare(
+            """
+            SELECT MAX(r.inventory_completed_at) FROM daily_reports d
+            JOIN scan_runs r ON r.id = d.run_id
+            WHERE d.storage_domain_id = ? AND r.status = 'succeeded' AND r.kind IN ('full','recovery')
+            """)
+        try statement.bind(storageDomainID.rawValue, at: 1)
+        guard try statement.step(), !statement.columnIsNull(0) else { return nil }
+        return Date(timeIntervalSince1970: statement.columnDouble(0))
+    }
+
     public static func writerIsActive(
         databaseURL: URL = SQLiteInventoryStore.defaultDatabaseURL
     ) -> Bool {
@@ -428,7 +444,7 @@ public actor SQLiteReportStore {
             SELECT run_id, storage_domain_id, generated_at,
                    event_attributed_delta, reconciliation_correction,
                    reconciled_indexed_delta, dailydisk_overhead_delta,
-                   physical_used_delta, physical_unattributed_delta, payload_json
+                   physical_used_delta, physical_unattributed_delta, payload_json, snapshot_compared_delta
             FROM daily_reports
             """
         )
@@ -450,6 +466,7 @@ public actor SQLiteReportStore {
                 report.runID == ScanRun.ID(runUUID)
                 && report.storageDomainID == StorageDomain.ID(domain)
                 && report.generatedAt.timeIntervalSince1970 == statement.columnDouble(2)
+                && accounting.snapshotComparedDelta == statement.columnInt64(10)
                 && accounting.eventAttributedDelta == statement.columnInt64(3)
                 && accounting.reconciliationCorrection == statement.columnInt64(4)
                 && accounting.reconciledIndexedDelta == statement.columnInt64(5)

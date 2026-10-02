@@ -50,69 +50,80 @@ public struct FSEventHistoryReader: EventHistoryReading {
         volume: MonitoredVolume,
         checkpoint: EventStreamCheckpoint?
     ) async throws -> any EventHistorySession {
-        let eventID = checkpoint?.lastEventID
-        guard volume.inventoryMode == .full,
-            volume.supportsPersistentEvents,
-            volume.deviceID != 0,
-            let nativeDeviceID = nativeDeviceID(from: volume.deviceID)
-        else {
-            return UnavailableEventHistorySession(
-                volumeID: volume.id,
-                eventStoreUUID: volume.eventStoreUUID,
-                eventID: eventID,
-                reason: "Volume does not support persistent FSEvents"
-            )
-        }
-
-        let observedUUID = eventStoreUUIDProvider.eventStoreUUID(deviceID: volume.deviceID)
-        let journalAssessment = EventTrustEvaluator.assessJournal(
-            expectedUUID: checkpoint?.eventStoreUUID ?? volume.eventStoreUUID,
-            observedUUID: observedUUID,
-            previousEventID: eventID,
-            observedEventID: eventID
-        )
-        guard journalAssessment.trust == .trusted, let observedUUID else {
-            return UnavailableEventHistorySession(
-                volumeID: volume.id,
-                eventStoreUUID: observedUUID,
-                eventID: eventID,
-                reason: journalAssessment.reasons.joined(separator: "; ")
-            )
-        }
-
-        let watchPaths = try configuration.watchRoots.map { path -> String in
-            if path == .root { return "/" }
-            guard let value = String(data: path.bytes, encoding: .utf8) else {
-                throw FSEventReaderError.watchPathIsNotUTF8(path)
+        return try await ScanProbe.$context.withValue(ScanProbe.context.session()) {
+            ScanProbe.emit(
+                .sessionOpened,
+                fields: [
+                    "volume": volume.id.rawValue, "device": String(volume.deviceID),
+                    "expectedUUID": checkpoint?.eventStoreUUID.uuidString ?? volume.eventStoreUUID?.uuidString ?? "nil",
+                    "since": checkpoint?.lastEventID.map { String($0) } ?? "sinceNow",
+                ])
+            let eventID = checkpoint?.lastEventID
+            guard volume.inventoryMode == .full,
+                volume.supportsPersistentEvents,
+                volume.deviceID != 0,
+                let nativeDeviceID = nativeDeviceID(from: volume.deviceID)
+            else {
+                ScanProbe.emit(.rejection, reason: .journalUnavailable)
+                return UnavailableEventHistorySession(
+                    volumeID: volume.id,
+                    eventStoreUUID: volume.eventStoreUUID,
+                    eventID: eventID,
+                    reason: "Volume does not support persistent FSEvents"
+                )
             }
-            return "/" + value
+
+            let observedUUID = eventStoreUUIDProvider.eventStoreUUID(deviceID: volume.deviceID)
+            let journalAssessment = EventTrustEvaluator.assessJournal(
+                expectedUUID: checkpoint?.eventStoreUUID ?? volume.eventStoreUUID,
+                observedUUID: observedUUID,
+                previousEventID: eventID,
+                observedEventID: eventID
+            )
+            guard journalAssessment.trust == .trusted, let observedUUID else {
+                return UnavailableEventHistorySession(
+                    volumeID: volume.id,
+                    eventStoreUUID: observedUUID,
+                    eventID: eventID,
+                    reason: journalAssessment.reasons.joined(separator: "; ")
+                )
+            }
+
+            let watchPaths = try configuration.watchRoots.map { path -> String in
+                if path == .root { return "/" }
+                guard let value = String(data: path.bytes, encoding: .utf8) else {
+                    throw FSEventReaderError.watchPathIsNotUTF8(path)
+                }
+                return "/" + value
+            }
+            let mailbox = FSEventMailbox(
+                volumeID: volume.id,
+                previousEventID: eventID,
+                maximumBufferedEvents: configuration.maximumBufferedEvents,
+                historyStartsComplete: eventID == nil
+            )
+            let callbackBox = FSEventCallbackBox(mailbox: mailbox)
+            let sinceWhen = eventID ?? FSEventStreamEventId(kFSEventStreamEventIdSinceNow)
+            let handle = try FSEventStreamHandle(
+                nativeDeviceID: nativeDeviceID,
+                watchPaths: watchPaths,
+                sinceWhen: sinceWhen,
+                latency: configuration.latency,
+                callbackBox: callbackBox
+            )
+            return ActiveEventHistorySession(
+                volumeID: volume.id,
+                deviceID: volume.deviceID,
+                initialEventStoreUUID: observedUUID,
+                initialEventID: eventID,
+                configuration: configuration,
+                eventStoreUUIDProvider: eventStoreUUIDProvider,
+                mailbox: mailbox,
+                handle: handle
+            )
         }
-        let mailbox = FSEventMailbox(
-            volumeID: volume.id,
-            previousEventID: eventID,
-            maximumBufferedEvents: configuration.maximumBufferedEvents,
-            historyStartsComplete: eventID == nil
-        )
-        let callbackBox = FSEventCallbackBox(mailbox: mailbox)
-        let sinceWhen = eventID ?? FSEventStreamEventId(kFSEventStreamEventIdSinceNow)
-        let handle = try FSEventStreamHandle(
-            nativeDeviceID: nativeDeviceID,
-            watchPaths: watchPaths,
-            sinceWhen: sinceWhen,
-            latency: configuration.latency,
-            callbackBox: callbackBox
-        )
-        return ActiveEventHistorySession(
-            volumeID: volume.id,
-            deviceID: volume.deviceID,
-            initialEventStoreUUID: observedUUID,
-            initialEventID: eventID,
-            configuration: configuration,
-            eventStoreUUIDProvider: eventStoreUUIDProvider,
-            mailbox: mailbox,
-            handle: handle
-        )
     }
+
 }
 
 public enum FSEventReaderError: Error, Equatable, Sendable {
@@ -127,6 +138,7 @@ public enum FSEventReaderError: Error, Equatable, Sendable {
 }
 
 private actor UnavailableEventHistorySession: EventHistorySession {
+    let probe = ScanProbe.context
     let volumeID: MonitoredVolume.ID
     let eventStoreUUID: UUID?
     let eventID: UInt64?
@@ -176,7 +188,8 @@ private actor UnavailableEventHistorySession: EventHistorySession {
     func stop() async {}
 
     private func fence(phase: EventCursorFence.Phase) -> EventCursorFence {
-        EventCursorFence(
+        probe.emit(phase == .historyDone ? .historyDone : .liveFlush, fields: ["trust": "fullScanRequired"])
+        return EventCursorFence(
             volumeID: volumeID,
             eventStoreUUID: eventStoreUUID,
             highestFullyDeliveredEventID: eventID,
@@ -188,6 +201,7 @@ private actor UnavailableEventHistorySession: EventHistorySession {
 }
 
 private actor ActiveEventHistorySession: EventHistorySession {
+    let probe = ScanProbe.context
     enum State: Equatable {
         case idle
         case replaying
@@ -209,6 +223,9 @@ private actor ActiveEventHistorySession: EventHistorySession {
 
     var state: State = .idle
     var highestDeliveredEventID: UInt64?
+    var lastConsumeSample: UInt64 = 0
+    var consumedBatches: UInt64 = 0
+    var consumptionNanoseconds: UInt64 = 0
 
     init(
         volumeID: MonitoredVolume.ID,
@@ -250,7 +267,11 @@ private actor ActiveEventHistorySession: EventHistorySession {
             let deadline = Date().addingTimeInterval(configuration.historyTimeoutSeconds)
             while true {
                 try await observer.checkpoint()
-                guard state == .replaying else { throw FSEventReaderError.operationInterrupted }
+                guard state == .replaying else {
+                    probe.emit(.rejection, reason: .operationInterrupted)
+                    throw FSEventReaderError.operationInterrupted
+                }
+                try mailbox.checkReplayTrust()
                 let events = mailbox.drainHistorical(maximumCount: EventBatch.maximumEventCount)
                 if !events.isEmpty {
                     try await deliver(
@@ -273,6 +294,7 @@ private actor ActiveEventHistorySession: EventHistorySession {
                     return fence
                 }
                 if Date() >= deadline {
+                    probe.emit(.rejection, reason: .historyTimeout)
                     let boundary = mailbox.latestSequence
                     let fence = makeFence(
                         phase: .historyDone,
@@ -314,17 +336,25 @@ private actor ActiveEventHistorySession: EventHistorySession {
         state = .flushing
         do {
             try await observer.checkpoint()
-            let preFlushEventID = eventStoreUUIDProvider.latestEventID(deviceID: deviceID)
+            try mailbox.checkReplayTrust()
+            let preFlushEventID = ScanProbe.$context.withValue(probe) {
+                eventStoreUUIDProvider.latestEventID(deviceID: deviceID)
+            }
             guard await handle.flushSynchronously() else {
+                probe.emit(.rejection, reason: .operationInterrupted)
                 throw FSEventReaderError.operationInterrupted
             }
             try await observer.checkpoint()
-            guard state == .flushing else { throw FSEventReaderError.operationInterrupted }
+            guard state == .flushing else {
+                probe.emit(.rejection, reason: .operationInterrupted)
+                throw FSEventReaderError.operationInterrupted
+            }
             if let preFlushEventID {
                 highestDeliveredEventID = max(highestDeliveredEventID ?? 0, preFlushEventID)
             }
             let boundary = mailbox.latestSequence
             while true {
+                try mailbox.checkReplayTrust()
                 let events = mailbox.drainLive(
                     throughSequence: boundary,
                     maximumCount: EventBatch.maximumEventCount
@@ -337,7 +367,10 @@ private actor ActiveEventHistorySession: EventHistorySession {
                     consume: consume
                 )
             }
-            guard state == .flushing else { throw FSEventReaderError.operationInterrupted }
+            guard state == .flushing else {
+                probe.emit(.rejection, reason: .operationInterrupted)
+                throw FSEventReaderError.operationInterrupted
+            }
             let fence = makeFence(phase: .liveFlush, boundarySequence: boundary)
             mailbox.discardAssessments(throughSequence: boundary)
             handle.stop()
@@ -364,11 +397,41 @@ private actor ActiveEventHistorySession: EventHistorySession {
     ) async throws {
         for batch in try EventCoalescer.batches(events) {
             try await observer.checkpoint()
-            try await consume(batch)
+            try mailbox.checkReplayTrust()
+            let consumptionStart = DispatchTime.now().uptimeNanoseconds
+            let verify: @Sendable () throws -> Void = { [mailbox] in try mailbox.checkReplayTrust() }
+            do {
+                try await EventReplayGuard.$check.withValue(verify) {
+                    try await ScanProbe.$context.withValue(probe) { try await consume(batch) }
+                }
+                try mailbox.checkReplayTrust()
+            } catch {
+                probe.emit(
+                    .consumeSummary,
+                    fields: [
+                        "count": String(batch.events.count), "failed": "true",
+                        "elapsedNanoseconds": String(DispatchTime.now().uptimeNanoseconds - consumptionStart),
+                    ])
+                throw error
+            }
+            consumedBatches &+= 1
+            consumptionNanoseconds &+= DispatchTime.now().uptimeNanoseconds - consumptionStart
+            if probe.detailed && consumptionStart - lastConsumeSample >= 1_000_000_000 {
+                lastConsumeSample = consumptionStart
+                probe.emit(
+                    .consumeSummary,
+                    fields: [
+                        "count": String(batch.events.count), "failed": "false",
+                        "elapsedNanoseconds": String(DispatchTime.now().uptimeNanoseconds - consumptionStart),
+                    ])
+            }
             try await observer.checkpoint(
                 ScanProgressDelta(processedEvents: UInt64(batch.events.count))
             )
-            guard state == expectedState else { throw FSEventReaderError.operationInterrupted }
+            guard state == expectedState else {
+                probe.emit(.rejection, reason: .operationInterrupted)
+                throw FSEventReaderError.operationInterrupted
+            }
             if let maximum = batch.events.map(\.id).filter({ $0 != 0 }).max() {
                 highestDeliveredEventID = max(highestDeliveredEventID ?? 0, maximum)
             }
@@ -380,39 +443,51 @@ private actor ActiveEventHistorySession: EventHistorySession {
         boundarySequence: UInt64,
         additionalAssessment: EventTrustAssessment = EventTrustAssessment(trust: .trusted)
     ) -> EventCursorFence {
-        let observedUUID = eventStoreUUIDProvider.eventStoreUUID(deviceID: deviceID)
-        let journal = EventTrustEvaluator.assessJournal(
-            expectedUUID: initialEventStoreUUID,
-            observedUUID: observedUUID,
-            previousEventID: initialEventID,
-            observedEventID: highestDeliveredEventID
-        )
-        let afterSequence: UInt64 =
-            phase == .liveFlush
-            ? mailbox.historyBoundarySequence ?? 0
-            : 0
-        var assessment = mailbox.assessment(
-            afterSequence: afterSequence,
-            throughSequence: boundarySequence
-        )
-        .merging(journal)
-        .merging(additionalAssessment)
-        if phase == .liveFlush, highestDeliveredEventID == nil {
-            assessment = assessment.merging(
-                EventTrustAssessment(
-                    trust: .fullScanRequired,
-                    reasons: ["FSEvents could not establish a durable event cursor"]
+        return ScanProbe.$context.withValue(probe) {
+            let observedUUID = eventStoreUUIDProvider.eventStoreUUID(deviceID: deviceID)
+            let journal = EventTrustEvaluator.assessJournal(
+                expectedUUID: initialEventStoreUUID,
+                observedUUID: observedUUID,
+                previousEventID: initialEventID,
+                observedEventID: highestDeliveredEventID
+            )
+            let afterSequence: UInt64 =
+                phase == .liveFlush
+                ? mailbox.historyBoundarySequence ?? 0
+                : 0
+            var assessment = mailbox.assessment(
+                afterSequence: afterSequence,
+                throughSequence: boundarySequence
+            )
+            .merging(journal)
+            .merging(additionalAssessment)
+            if phase == .liveFlush, highestDeliveredEventID == nil {
+                assessment = assessment.merging(
+                    EventTrustAssessment(
+                        trust: .fullScanRequired,
+                        reasons: ["FSEvents could not establish a durable event cursor"],
+                        probeReason: .cursorUnavailable
+                    )
                 )
+            }
+            var fields = mailbox.probeSummary
+            fields["trust"] = String(describing: assessment.trust)
+            fields["journalUUID"] = observedUUID?.uuidString ?? "nil"
+            fields["expectedUUID"] = initialEventStoreUUID.uuidString
+            fields["delivered"] = highestDeliveredEventID.map { String($0) } ?? "nil"
+            fields["boundary"] = String(boundarySequence)
+            fields["consumedBatches"] = String(consumedBatches)
+            fields["consumptionNanoseconds"] = String(consumptionNanoseconds)
+            probe.emit(phase == .historyDone ? .historyDone : .liveFlush, fields: fields)
+            return EventCursorFence(
+                volumeID: volumeID,
+                eventStoreUUID: observedUUID,
+                highestFullyDeliveredEventID: highestDeliveredEventID,
+                phase: phase,
+                trust: assessment.trust,
+                diagnostic: assessment.reasons.isEmpty ? nil : assessment.reasons.joined(separator: "; ")
             )
         }
-        return EventCursorFence(
-            volumeID: volumeID,
-            eventStoreUUID: observedUUID,
-            highestFullyDeliveredEventID: highestDeliveredEventID,
-            phase: phase,
-            trust: assessment.trust,
-            diagnostic: assessment.reasons.isEmpty ? nil : assessment.reasons.joined(separator: "; ")
-        )
     }
 }
 
@@ -422,6 +497,26 @@ private struct QueuedEvent {
 }
 
 final class FSEventMailbox: @unchecked Sendable {
+    let probe = ScanProbe.context
+    private var callbacks: UInt64 = 0
+    private var lastSample: UInt64 = 0
+    private var received: UInt64 = 0
+    private var consumed: UInt64 = 0
+    private var peak = 0
+    private var observedFlags: UInt32 = 0
+    private var firstOverflow: UInt64?
+    var probeSummary: [String: String] {
+        lock.withLock { summaryLocked() }
+    }
+    private func summaryLocked() -> [String: String] {
+        [
+            "callbacks": String(callbacks), "received": String(received), "consumed": String(consumed),
+            "buffered": String(historical.count - historicalIndex + live.count - liveIndex),
+            "peak": String(peak), "flags": String(observedFlags),
+            "firstOverflowNanoseconds": firstOverflow.map { String($0) } ?? "nil",
+        ]
+    }
+
     let volumeID: MonitoredVolume.ID
     let previousEventID: UInt64?
     let maximumBufferedEvents: Int
@@ -450,6 +545,15 @@ final class FSEventMailbox: @unchecked Sendable {
         historyBoundary = historyStartsComplete ? 0 : nil
     }
 
+    /// Any observed fatal loss invalidates this attempt, including live overflow
+    /// while history is still being consumed. Never treat subtree repair as fatal.
+    func checkReplayTrust() throws {
+        let evidence = lock.withLock { historicalAssessment.merging(liveAssessment) }
+        if evidence.trust == .fullScanRequired {
+            throw EventReplayInvalidated(reasons: evidence.reasons)
+        }
+    }
+
     var historyBoundarySequence: UInt64? {
         lock.withLock { historyBoundary }
     }
@@ -468,10 +572,21 @@ final class FSEventMailbox: @unchecked Sendable {
 
     // Publish callback receipt atomically: no fence may observe half a callback.
     func appendBatch(count: Int, eventAt: (Int) -> (Data, UInt32, UInt64)?) {
-        lock.withLock {
-            for index in 0..<count {
-                guard let (path, flags, id) = eventAt(index) else { continue }
-                appendLocked(pathBytes: path, flagsRawValue: flags, eventID: id)
+        ScanProbe.$context.withValue(probe) {
+            lock.withLock {
+                callbacks &+= 1
+                for index in 0..<count {
+                    guard let (path, flags, id) = eventAt(index) else { continue }
+                    received &+= 1
+                    observedFlags |= flags
+                    appendLocked(pathBytes: path, flagsRawValue: flags, eventID: id)
+                    peak = max(peak, historical.count - historicalIndex + live.count - liveIndex)
+                }
+                let now = DispatchTime.now().uptimeNanoseconds
+                if (probe.detailed && now - lastSample >= 1_000_000_000) || callbacks % 1024 == 0 {
+                    lastSample = now
+                    probe.emit(.callbackSummary, fields: summaryLocked())
+                }
             }
         }
     }
@@ -492,7 +607,8 @@ final class FSEventMailbox: @unchecked Sendable {
             assessment = assessment.merging(
                 EventTrustAssessment(
                     trust: .fullScanRequired,
-                    reasons: ["FSEvents delivered an event below the committed cursor"]
+                    reasons: ["FSEvents delivered an event below the committed cursor"],
+                    probeReason: .eventBelowCommittedCursor
                 )
             )
         }
@@ -510,7 +626,7 @@ final class FSEventMailbox: @unchecked Sendable {
             recordAssessment(
                 EventTrustAssessment(
                     trust: .fullScanRequired,
-                    reasons: ["FSEvents delivered an invalid relative path"]
+                    reasons: ["FSEvents delivered an invalid relative path"], probeReason: .invalidRelativePath
                 ),
                 sequence: currentSequence
             )
@@ -521,10 +637,12 @@ final class FSEventMailbox: @unchecked Sendable {
         guard bufferedCount < maximumBufferedEvents else {
             if !overflowRecorded {
                 overflowRecorded = true
+                firstOverflow = DispatchTime.now().uptimeNanoseconds
+                probe.emit(.callbackSummary, fields: summaryLocked())
                 recordAssessment(
                     EventTrustAssessment(
                         trust: .fullScanRequired,
-                        reasons: ["DailyDisk FSEvents buffer overflowed"]
+                        reasons: ["DailyDisk FSEvents buffer overflowed"], probeReason: .mailboxOverflow
                     ),
                     sequence: currentSequence
                 )
@@ -547,6 +665,7 @@ final class FSEventMailbox: @unchecked Sendable {
             let end = min(historicalIndex + maximumCount, historical.count)
             guard historicalIndex < end else { return [] }
             let result = historical[historicalIndex..<end].map(\.event)
+            consumed &+= UInt64(result.count)
             historicalIndex = end
             compactIfNeeded(&historical, index: &historicalIndex)
             return result
@@ -563,6 +682,7 @@ final class FSEventMailbox: @unchecked Sendable {
                 result.append(live[liveIndex].event)
                 liveIndex += 1
             }
+            consumed &+= UInt64(result.count)
             compactIfNeeded(&live, index: &liveIndex)
             return result
         }
@@ -694,6 +814,7 @@ private final class FSEventStreamHandle: @unchecked Sendable {
             FSEventStreamStop(stream)
             FSEventStreamInvalidate(stream)
             FSEventStreamRelease(stream)
+            callbackBox.mailbox.probe.emit(.sessionStopped, fields: callbackBox.mailbox.probeSummary)
         }
     }
 }

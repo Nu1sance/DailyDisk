@@ -9,7 +9,7 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section("每日运行") {
-                LabeledContent("计划时间", value: "每天 09:00")
+                LabeledContent("计划时间", value: "每天 05:00")
                 LabeledContent("定时任务", value: launchStatusLabel)
                 HStack {
                     if controller.launchAgentStatus == .enabled
@@ -75,7 +75,7 @@ struct SettingsView: View {
                     Task { await controller.scanNow(requestedMode: .fullReconciliation) }
                 }
                 .disabled(controller.scanState.isActive || controller.launchAgentStatus != .enabled)
-                Text("通常无需手动使用。DailyDisk 每七天会自动完整核对一次。")
+                Text("通常无需手动使用。DailyDisk 每天 05:00 会自动完整核对一次。")
                     .font(.caption).foregroundStyle(.secondary)
             }
 

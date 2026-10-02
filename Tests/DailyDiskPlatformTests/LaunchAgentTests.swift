@@ -65,7 +65,7 @@ private func launchctlResult(_ output: String = "", status: Int32 = 0) -> Proces
     )
 }
 
-@Test("Embedded LaunchAgent is a non-resident daily 09:00 job")
+@Test("Embedded LaunchAgent is a non-resident daily 05:00 job")
 func launchAgentPlist() throws {
     let testsDirectory = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent()
@@ -84,7 +84,7 @@ func launchAgentPlist() throws {
     #expect(value["Label"] as? String == "io.github.xiuyuwu.DailyDisk.agent")
     #expect(value["BundleProgram"] as? String == "Contents/Helpers/DailyDiskAgent")
     #expect(arguments == ["DailyDiskAgent"])
-    #expect(calendar["Hour"] == 9)
+    #expect(calendar["Hour"] == 5)
     #expect(calendar["Minute"] == 0)
     #expect(value["KeepAlive"] as? Bool == false)
     #expect(value["ThrottleInterval"] == nil)

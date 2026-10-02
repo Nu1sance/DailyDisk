@@ -72,7 +72,7 @@ struct MainWindow: View {
             return ("正在检查", "可以关闭窗口，检查会在后台继续", Theme.accent)
         }
         switch controller.launchAgentStatus {
-        case .enabled: return ("每日检查已启用", "内置磁盘 · 每天 09:00", Theme.positive)
+        case .enabled: return ("每日检查已启用", "内置磁盘 · 每天 05:00", Theme.positive)
         case .requiresApproval: return ("等待系统批准", "在登录项中允许 DailyDisk", Theme.warning)
         case .notRegistered: return ("每日检查未启用", "在概览中启用", .secondary)
         case .notFound: return ("应用资源缺失", "请重新安装 DailyDisk", Theme.warning)

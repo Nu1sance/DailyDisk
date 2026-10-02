@@ -367,6 +367,19 @@ public struct APFSVolumeProvider: VolumeDiscovering {
             }
             return lhs.id.rawValue < rhs.id.rawValue
         }
+        for volume in volumes {
+            ScanProbe.emit(
+                .volumeDiscovered,
+                fields: [
+                    "volume": volume.id.rawValue, "domain": volume.storageDomainID.rawValue,
+                    "volumeRole": volume.role.rawValue, "groupUUID": volume.volumeGroupUUID?.uuidString ?? "nil",
+                    "filesystemUUID": volume.filesystemUUID?.uuidString ?? "nil",
+                    "device": String(volume.deviceID),
+                    "nativeDevice": nativeDeviceID(from: volume.deviceID).map { String($0) } ?? "nil",
+                    "journalUUID": volume.eventStoreUUID?.uuidString ?? "nil",
+                    "topology": volume.topologyFingerprint, "inventoryMode": volume.inventoryMode.rawValue,
+                ])
+        }
         return VolumeTopology(
             domains: domains,
             volumes: volumes,

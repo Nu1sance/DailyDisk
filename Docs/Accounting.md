@@ -27,14 +27,24 @@ Creating or removing a secondary hard link produces a path-only ledger entry wit
 
 APFS clones and shared extents cannot be deduplicated accurately with ordinary `stat` metadata. Consequently, indexed allocated bytes are an attribution signal rather than a claim about unique physical blocks.
 
-## Daily formulas
+## Daily-full target and accounting compatibility
+
+Daily full scans compare previous committed inventory directly with final staging. `snapshotComparison` ledger records use addition/removal/modification/attribution-transfer kinds and contribute to `snapshotComparedDelta`. They are not event attribution or reconciliation errors. Same-day incremental checks and legacy recovery retain their existing decomposition. Old JSON payloads decode the absent snapshot field as zero; they are not rewritten. Migration 007 adds a matching aggregate column. Ordinary daily differences do not feed correction alerts.
+
+```text
+reconciledIndexedDelta = snapshotComparedDelta + eventAttributedDelta + reconciliationCorrection
+```
+
+The signed physical/file/overhead balance is unchanged. See [the design](DailyFullScan.md).
+
+## Current persisted formulas
 
 For ordinary files:
 
 ```text
 eventAttributedDelta = sum(FSEvents-derived allocated deltas)
 reconciliationCorrection = sum(full-scan reconciliation allocated deltas)
-reconciledIndexedDelta = eventAttributedDelta + reconciliationCorrection
+reconciledIndexedDelta = snapshotComparedDelta + eventAttributedDelta + reconciliationCorrection
 ```
 
 DailyDisk-owned database, WAL, report, and log changes are classified separately:

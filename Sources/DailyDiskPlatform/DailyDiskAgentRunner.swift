@@ -12,6 +12,22 @@ public struct DailyDiskAgentRunner: Sendable {
 
     public func run(dryRun: Bool = false) async -> Int32 {
         if dryRun { return await DailyDiskScheduledRunner().run(dryRun: true) }
+        let environment = ProcessInfo.processInfo.environment
+        let probe = ScanProbeLogger()
+        let context = ScanProbeContext(
+            recorder: environment["DAILYDISK_SCAN_PROBES"] == "0" ? nil : probe,
+            detailed: environment["DAILYDISK_SCAN_PROBE_DETAIL"] == "1")
+        let result = await ScanProbe.$context.withValue(context) {
+            ScanProbe.emit(.helperStarted)
+            let result = await runObserved()
+            ScanProbe.emit(.helperFinished)
+            return result
+        }
+        await probe.flush()
+        return result
+    }
+
+    private func runObserved() async -> Int32 {
         do {
             let controlStore = try RunControlStore()
             try await controlStore.clearHelperIdle()

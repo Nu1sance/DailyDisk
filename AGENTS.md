@@ -91,7 +91,7 @@ Its label is:
 io.github.xiuyuwu.DailyDisk.agent
 ```
 
-It runs at 09:00 local time and also at login for due/catch-up evaluation. `KeepAlive` is false, so persistent failures do not create a retry storm.
+Source runs at 05:00 local time and at login for due/catch-up evaluation. Upgrade the installed GUI/helper and registered job together; an older registration may still use 09:00. `KeepAlive` is false, so persistent failures do not create a retry storm.
 
 ## 5. Core architecture
 
@@ -120,7 +120,7 @@ DailyDisk's own Application Support subtree is excluded from ordinary inventory 
 
 ### Incremental scan
 
-Daily scans use per-device FSEvents and persist both:
+Daily full scanning runs at 05:00; only subsequent manual checks after a published same-local-day full scan attempt incremental scanning. This replaces incremental-first daily checks and the rolling seven-day full-scan design. Incremental and scan-time catch-up sessions use per-device FSEvents and persist both:
 
 - Event Store UUID
 - last fully applied Event ID
@@ -131,11 +131,11 @@ Inventory mutations, semantic change ledger, samples, and checkpoint advance com
 
 A full scan uses two event sessions:
 
-1. Replay history and flush a concrete pre-scan cursor `E0`.
+1. Daily-full path: establish a trusted current-journal pre-scan cursor `E0`, without replaying yesterday’s committed history. Legacy scheduled reconciliation retains its original behavior, but is not selected by the daily policy.
 2. Stop the first session.
 3. Traverse into a staging generation.
 4. Open a second historical session from `E0`.
-5. Replay scan-time events into staging and expected state.
+5. Replay scan-time events into staging; daily full compares against unchanged previous inventory. Legacy reconciliation also maintains expected state.
 6. Flush a final cursor `E1`.
 7. Seal, reconcile, and atomically activate staging with `E1`.
 
@@ -161,6 +161,7 @@ Never edit an existing migration that may have been applied. Add a new numbered 
 All deltas are signed `Int64` byte values:
 
 ```text
+snapshotComparedDelta
 eventAttributedDelta
 reconciliationCorrection
 reconciledIndexedDelta
@@ -172,7 +173,7 @@ physicalUnattributedDelta
 The central formula is:
 
 ```text
-reconciledIndexedDelta = eventAttributedDelta + reconciliationCorrection
+reconciledIndexedDelta = snapshotComparedDelta + eventAttributedDelta + reconciliationCorrection
 
 physicalUnattributedDelta = physicalUsedDelta
                           - reconciledIndexedDelta
@@ -291,7 +292,7 @@ Keep these stable:
 
 The app must remain under `/Applications` or `~/Applications` for LaunchAgent registration.
 
-## 10. Running now instead of waiting for 09:00
+## 10. Running now instead of waiting for the daily schedule
 
 Open **概览** and select **开始首次检查** or **立即检查**. The app writes a private fixed-schema request, starts or attaches to `DailyDiskAgent` without `kickstart -k`, and shows phase/count/elapsed progress. Closing the GUI does not stop the helper; reopening attaches to persistent progress.
 
@@ -522,6 +523,38 @@ Incremental attribution must join `hybrid_generations` and `hybrid_objects` dire
 
 ## TODO
 
+### 当前后续优先级：降低每日全量实际写入（2026-10-02）
+
+详见 `Docs/WriteOptimizationReview.md`。10 月 2 日真实 helper 约写 16.39 GB，主要为遍历入库 11.63 GB、sealing 1.69 GB、提交 1.02 GB、清理 2.02 GB；不是读取量或 NAND 磨损。旧 10 万行 A/B 的 37.6% 降幅不外推真实负载。
+
+- [x] 从 append、canonical sealing、commit、retention 重审生产源码。确认全代重写、多索引维护、带 UUID/完整路径的 canonical 运行中间表、ledger 列与 JSON 双表示。
+- [x] 合成 PRAGMA index_xinfo 确认 hybrid_order 反向 UNIQUE 索引携带完整 path；不能直接删除唯一约束或宣称节省同等写入。
+- [ ] W1：补齐事务/cache spill/checkpoint 与前后占用/空闲页测量；清理后占用独立展示，不替换旧报表的一半采样边界。
+- [ ] W2：同夹具测试 cache/checkpoint、批内写入顺序、no-op upsert，保留 FULL 和 WAL/内存边界。
+- [ ] W3：实验 compact canonical 暂存或 inactive staging 一次构建，减少路径重复和提交复制；收益成立再新增迁移。
+- [ ] W4：排序表窄键布局和旧代删除写入分别实验，保留 raw-byte seek、FK、恢复窗口和原子激活。
+- [ ] W5：明确历史 ledger 保留/汇总与编码策略；不得未经授权淘汰旧明细。
+- [ ] **W6 主方案（用户 2026-10-02 决策）**：每日完整读取、差异持久化；一份当前库存 + 本轮变更暂存 + 短期旧值恢复，复用未变化对象/路径/排序/canonical。独立分支开发，不按实现成本后置。先 W1，再 W6，吸收 W3/W4；W5 不作为前置条件。详细设计/验收见 Docs/WriteOptimizationReview.md。
+- [ ] W6 不得逐条写 last_seen、复制全代成员关系、长时间钉住 WAL 或用近似结构判删除；批量比较与精确访问标记必须有界。硬链接对象与路径分开处理，opaque 继承，E0/E1 和原子激活不弱化。早期删除旧库存授权不延伸到本次，迁移保留 schema 7 数据。
+- [x] 主线小改动：对象 NULL-safe no-op UPDATE 与相同排序映射 UPDATE 跳过，保留 membership/coverage/seal 语义；收益不外推全量扫描。
+
+184.64 MB 是两个提交前占用采样的差，缺少前一日逐表/空闲页/WAL 快照，不能归因成今天提交的约 6 万条 ledger。空间复用与累计写入是两个指标。此次仅更新审查与规划，不修改生产算法或安装。
+
+
+### 当前优先级：每日默认全量与低写入设计（2026-10-01）
+
+用户决定不再优先追查 macOS journal UUID 重建根因，转向每日默认全量。设计审查见 `Docs/DailyFullScan.md`。目标确定为本地时间 05:00 每日全量；当天已有成功全量后，用户再次请求才尝试增量，可信历史失败时快速回退全量。当前源码已实现 05:00 与新策略；安装和实机验收状态见文末记录。详细行为与四轮顺序以 `Docs/DailyFullScan.md` 为准，不将现有 scheduled-full 等同于新设计。
+
+- [x] 审查跨日历史依赖：现有 scheduled-full 仍回放旧 checkpoint，不能只将七天改成一天。
+- [x] 确认写入优化候选：每个事务后的 TRUNCATE checkpoint、512 条批次、库存重建及 VACUUM；优先保留可复用页及 FULL 持久性。
+- [x] 第一轮源码：将调度默认值/GUI/安装说明/测试一并改为 05:00，按本地日期及成功全量报告判定自动去重与手动增量；失败/取消不冒充成功，已有成功全量不被后续失败抹去。实现每日直接全量：只要求本次 E0–E1 可信，保留 opaque/硬链接/取消/原子提交；完善每日调度去重。
+- [x] 明确定义前后库存差分的报告与告警语义，不把正常日增长全部当作“校正异常”；无需删除历史数据。
+- [x] 第二轮：完成同夹具 A/B，采用有界 WAL 与 1024 条批次，保留 FULL；完成读者阻塞、崩溃和关闭失败回归及百万行每日替换验收。
+- [x] 第三轮：分开测量过期库存删除和 VACUUM；证据支持复用空闲页，维持恢复窗口与七天压缩冷却，不每日无条件压缩。
+- [x] 第四轮：2026-10-02 自然例行全量测得 helper 累计写入约 16.39 GB；后续优化需重新验收，不把数据库体积当累计写入或 NAND 磨损。
+- [x] 修复 CI 取消测试的 50 ms 时序假设：子进程通过 ready 文件握手，并阻塞于 FIFO，测试显式取消；保留超时兜底，不通过串行化或重试隐藏失败。
+
+
 ### 存储落地前的测试失败排查（2026-09-29）
 
 用户要求先排清两个间歇失败，再落地新结构。详见 `Docs/Testing.md` 的 “Investigation of the two intermittent failures”。`stopFallbackIsRequestScoped` 原先靠 10 ms 等待和 100 ms fallback 推测请求切换顺序；受控延迟实验已复现“旧请求仍可取消时合法发信号，却被测试判错”。测试现用显式异步握手控制切换，生产取消保护未改动。历史日志不足以重建当时确切调度顺序。
@@ -530,17 +563,234 @@ Incremental attribution must join `hybrid_generations` and `hybrid_objects` dire
 
 - [x] 消除取消测试依赖毫秒等待的顺序假设，保留跨请求禁止误停断言。
 - [ ] 捕获原生 quiet-cursor 失败的完整诊断，查明系统游标不可用原因；不得用串行通过、重试转绿或全局事件 ID 代替证据。
-- [ ] 持续记录原生游标问题，不将目前未复现视作修复。按用户最新优先级（2026-09-29），该调查后置，先继续验证混合结构的空间收益和正确性；保留全部可信事件保护。
+- [ ] 持续记录原生游标问题，不将目前未复现视作修复。该项保留为未决诊断，不再优先于每日全量重构；保留已有探针与全部可信事件保护。
 
-### 后续修复：游标缺失与跨日全量恢复的关联诊断
+### 历史规划：增量回退根因诊断与轻量探针（2026-09-29）
 
-- [ ] 分别记录同一设备在卷发现、打开事件流、读取游标、flush 和检查点提交阶段的设备身份、日志 UUID、游标及失败类别。UUID 表示事件日志身份，游标表示日志位置；测试中的“无法取得位置”和每日扫描中的“日志身份变化”是不同的直接触发条件。
-- [ ] 对照系统重启、挂载变化及日志重建，验证是否存在共同原因。日志重建或设备匹配错误可能同时影响 UUID 和游标，但目前没有证据确认；不得把两者直接合并为同一 bug。9/27 的硬链接歧义与缓冲溢出仍单独排查。
-- [ ] 保留有限、无路径的诊断历史，取得证据后修复实际原因；不以全局游标、忽略 UUID 变化或丢弃事件来避免全量恢复。
+优先级已由 2026-10-01 每日全量规划取代。保留已实现探针和可信保护，以下历史调查不再作为默认每日扫描的设计目标。
 
-当前交付顺序：混合方案补充测试 → 通过正确性和性能门槛后正式接入 → 后续增量可靠性调查。用户已说明仍处内测，不需要旧库存到新结构的数据迁移；采用明确的新建基线流程，不能静默把旧库解释为新格式或沿用旧 checkpoint。此决定不免除新结构的事务、崩溃恢复和逻辑一致性验证。
+目标：在下一次增量回退时，明确指出哪个阶段、哪个输入、哪条规则首先触发，并区分正常周期全量、事件历史失效和程序自身问题。本节取代此前“先压缩、增量调查后置”的当前优先级；旧记录保留为历史依据。下列探针已接入源码，安装与跨日观测仍待验收；本节不授权中断正在运行的检查。
 
-### 降低数据库空间占用并恢复可靠的日常增量扫描（第一轮已验收；第二轮 2A 已完成）
+已知证据：9/25、9/26、9/28 曾因 journal UUID changed 回退；9/27 同时记录硬链接身份歧义和缓冲区溢出，但缺少先后顺序，不能推断因果。增量检查的性能问题已修复，不再列为本节待办：兼容视图反复物化整代库存的问题已改为紧凑表按键查找，真实增量验收在 306 秒内完成且未回退全量，详见 `Docs/Testing.md` 的 “Incremental attribution materialization”。当前待查的是为何回退全量，以及 UUID 变化与游标缺失是否有关；不得将已解决的性能问题重新列为待排查根因。
+
+#### 1. 保留决策、具体原因和因果顺序
+
+- [x] 在 `ScanPolicy` / `DailyDiskRunCoordinator` 记录最初选择：首次全量、七天周期全量、用户强制全量或增量；记录检查点是否存在及周期判断依据，避免把计划内全量计为异常回退。
+- [x] 从 `ScanCoordinator` 的 `recoveryRequired(reasons:)` 保留具体原因到上层恢复决策，避免只剩统一的 `eventHistoryLost`。增加稳定原因分类，不依赖解析展示字符串；不改变可信判断结果。
+- [x] 用 request、run、attempt、session 标识关联同一请求下的增量尝试与恢复扫描。记录阶段、墙上时间、单调耗时和递增序号，单独保存首次触发原因及后续原因；不能用排序去重后的原因集合推断发生顺序。
+- [x] 在失败清理前保存关键诊断，成功提交后记录结果；失败、取消、重启和报告恢复仍能串联。诊断写入失败不得推进检查点、改变核算或触发无限重试。
+
+#### 2. 串联设备身份、日志 UUID 与游标
+
+| 采样节点 | 必须记录的信息 | 排查目的 |
+| --- | --- | --- |
+| 卷发现 | Data 卷/文件系统身份、设备 ID 及原生转换值、拓扑组成 | 检查设备选择、挂载匹配和身份转换；设备号跨重启变化不能直接等同于换卷 |
+| 读取检查点 | 已提交 UUID、游标、活动代及拓扑标识 | 确认数据库中的基准来源 |
+| 打开事件流 | 实际设备 ID、原生 UUID、起始游标、会话角色 | 区分开流前已变化和会话内变化 |
+| HistoryDone / flush | UUID、原生游标返回值、最高已交付事件 ID、批次边界及可信状态 | 确定缺失或拒绝发生的阶段；HistoryDone 不得作为文件事件 ID |
+| 提交前后 | 预期旧检查点、拟提交检查点、事务成功状态及提交后值 | 区分读取、持久化和恢复缺陷；提交前日志不等同于提交成功 |
+
+- [x] 在 `APFSVolumeProvider`、`SystemEventStoreUUIDProvider`、`FSEventHistoryReader` 及提交边界接入同一诊断上下文。全量的 E0/E1 两个会话也要明确区分。
+- [x] 记录当前游标查询的 Unix/CF 时间基准入参、原始返回值、回退查询是否执行及最终采用值；区分原生返回零、设备转换失败和上层 nil。优先观察业务实际调用，额外只读探针的结果不得替代业务 fence。
+- [ ] 对照自然发生的系统重启、睡眠恢复、挂载变化及日志重建，验证 UUID 变化与游标缺失是否存在共同原因。未取得证据前不得合并为同一个 bug，也不得把暂未复现当作修复。
+
+#### 3. 汇总事件压力和身份歧义
+
+- [x] 在 FSEvents mailbox 按批次记录回调/事件数量、关键 flags、缓冲区当前值与峰值、首次溢出时刻，以及消费数量和批次耗时。
+- [x] 在 `InventoryMutator` 身份歧义处记录旧/新身份关系、链接数、剩余别名数量及事件标志；需要关联路径时采用受限匿名标识，不输出完整路径、文件名或内容。
+- [ ] 通过统一序号还原历史缓冲溢出与身份歧义的先后关系，不凭两条并存错误推断因果。事件压力指标仅用于诊断回退原因，不代表重新开启已解决的增量性能排查；记录事件流停止时刻以区分回调期与停止后的处理。
+
+#### 4. 日志约束、复现与验收
+
+- [x] 手动和定时 helper 共用探针；默认记录阶段摘要与异常，详细批次采样可开关。回调线程不写磁盘，不逐事件创建日志任务；诊断队列必须有界，并记录诊断丢弃数量，与真实事件丢失严格区分。
+- [x] 使用用户私有目录和受限权限，固定事件名/字段、无完整路径，轮转总量上限建议 20 MB。关键回退原因优先保留；不记录无限原始事件、不引入常驻任务或额外数据库膨胀。原始诊断不得提交仓库，公开结果只保留脱敏汇总。
+- [ ] 合成测试覆盖静默目录、创建/修改/删除、目录改名、硬链接重建/inode 复用、事件突发/慢消费、UUID 变化、游标不可用及检查点恢复；断言首次原因、时间线关联和失败后旧检查点不变。
+- [ ] 加入探针启用/关闭、日志轮转、队列饱和及写日志失败的测试；比较探针开关下的吞吐、延迟、内存和日志占用，确认诊断不改变业务结果、不制造新的缓冲溢出。
+- [ ] 安装验证须等待当前任务安全结束，沿用原签名和安装路径。先进行同日多轮检查，再观察跨日及实际重启/睡眠恢复；异常全量比例应排除首次、用户强制和周期全量。
+- [ ] 验收必须能还原一次回退的首因、阶段、设备/UUID/游标证据和后续恢复结果，再据证据修复实际原因。连续成功仅是观测结果，不足以单独证明间歇问题已消失。
+
+实现记录：已接入策略、稳定原因、请求/尝试/会话上下文、实际设备游标查询、E0/E1、提交边界及身份歧义。默认摘要日志使用 512 条有界队列、20 MiB 轮转上限和 0700/0600 权限，详细批次采样每秒限频；诊断丢弃与事件丢失分别计数。序号表示进程内观测入队顺序，不证明跨线程或跨进程因果；有限保留与异常退出可能丢失证据。合成测试已覆盖策略选择、UUID 拒绝后恢复及旧检查点保留、游标回退入参、迟到回调隔离、探针开关、轮转、饱和和写入失败。已有文件事件回归继续保留，并非每个场景都新增了探针断言；RSS、长时间实扫开销、真实首因时间线及跨日验收仍待完成。操作与验证详见 `Docs/Operations.md`、`Docs/Testing.md`。 最终默认并发全套 252 项通过（3 个 opt-in 跳过），格式、构建、LaunchAgent 与空白检查通过。本轮未更新本机安装或操作已安装数据库。 随后按用户请求完成本机安装：等待 helper 空闲，以原持久签名替换原路径应用并重启 GUI；三个可执行文件的 designated requirements 一致，深度严格签名和 helper dry-run 通过。持有稳定/写入锁核对检查点、扫描记录与报告内容前后一致，定时任务注册保留。未启动新扫描，真实回退与跨日观测仍待验收。
+
+实施顺序：决策与原因记录 + 身份/游标链路 → 按需增加批次压力/身份歧义探针 → 合成复现及跨日观察 → 根因修复与回归。始终保留 UUID、可信游标、事件丢失、硬链接和原子检查点保护；不以全局游标、忽略 UUID 变化、丢弃事件或重试转绿来避免全量恢复。内测不转换旧库存的决定不变，也不免除事务和恢复验证。
+
+### 实机探针观测：2026-09-30 例行检查回退（已确认直接原因）
+
+以下时间均为 Asia/Shanghai（UTC+8）。核对依据为私有 ScanProbes 日志、持有稳定数据/读取锁的只读数据库检查及系统 Unified Log；只记录脱敏汇总，不提交原始日志、卷身份或路径。检查时 helper 已退出，未启动新扫描、修改数据库或放宽可信规则。
+
+- **今日 09:00 例行检查最终执行了全量恢复，并成功完成。** 09:00:05 收到 scheduled 请求；09:00:09 策略明确选择 `incremental`，不是首次、七天周期或用户强制全量。上次全量基准在前一晚，尚未达到 604,800 秒周期。
+- **首次且唯一记录的拒绝原因是 `journalUUIDChanged`。** 同一请求的顺序为：序号 25/30 读取旧检查点 → 31 尝试打开增量会话 → 32 实际原生 UUID 查询 → 33 拒绝 → 36 增量失败 → 39 选择恢复 → 43 开始 `recoveryFull`。检查点中的 UUID 与系统 `FSEventsCopyUUIDForDevice` 返回值不同；拒绝发生于创建原生事件流前。增量尝试没有提交新检查点，恢复开始时仍读取原基准。数据库也记录一条 `dailySchedule` 增量失败和随后一条 `eventHistoryLost` 恢复成功，与探针一致。
+- 今天 00:37:39 开始的手动增量成功，00:39:49 最后观测到旧 UUID，09:00:09 首次观测到新 UUID。前后 Data 卷、文件系统/卷组身份、设备号及其原生转换、拓扑标识均一致，仅 journal UUID 改变；系统启动时间早于本次观测窗口，可排除窗口内整机重启，但不能排除睡眠恢复、短暂挂载变化或守护进程日志重建。
+- 恢复的 E0/E1 使用新 UUID，HistoryDone 和 live flush 均可信。两次实际游标查询的 Unix 路径均返回非零值，未执行 CF 回退；今天没有 `cursorUnavailable`、硬链接歧义或 mailbox overflow 拒绝，恢复 mailbox 峰值为 4,450。失败增量在 UUID 校验处已停止，因此没有该尝试的原生游标查询，不能推断旧 journal 的游标当时是否仍可用。诊断丢弃和写入失败均为零。
+- 09:13:37 进入提交阶段，09:18:16 才记录事务提交成功及新 UUID/检查点，09:20:24 完成报告、通知与保留清理流程，整个请求约 20 分 19 秒。数据库的 run finished_at / report 时间为 09:13:37，不能把它误认为落盘或任务完成时间。
+
+**系统侧进一步线索：** `fseventsd` 在 06:07:34.894 报告事件日志与卷不同步（`out of sync with volume`），并销毁旧日志；06:07:35.147 记录生成新 UUID，紧接着出现两条输出文件不存在的日志。上述事件落在本应用观测到的 UUID 变化窗口内，是系统主动重建日志的有力线索。不过 Unified Log 将卷路径和 UUID 隐去，现有记录无法将该系统事件与目标 Data 卷严格一一对应，也没有说明“不同步”的上游原因。后续文件打开失败发生在销毁/换 UUID 之后，不能倒推为本次重建的初因。01:45 的 history purge 记录本身同样不足以证明导致此次重建。
+
+结论边界：已还原本次真实回退的首因、阶段、身份对比、旧检查点保留及恢复提交链路；这是 journal 身份改变后的保护性恢复，不能通过忽略 UUID 来强行增量。系统为何判定日志与卷不同步仍待查，尚不能宣称频繁回退问题已修复或与历史 nil-cursor 问题同源。此外，探针另记录到前一晚 22:58 起的手动请求因 `hardLinkRecreated` 回退，说明多次全量可能有不同原因，不能统一归因于 UUID 变化。
+
+后续优先事项：
+
+- [x] 还原至少一次真实定时回退的完整首因与恢复结果（本次 UUID 变化）。
+- [ ] 针对系统 06:07 的日志重建，继续核对可获得的睡眠/唤醒、挂载及 fseventsd 生命周期证据；在能关联目标卷前，保留“相关线索”而非确定因果的表述。
+- [ ] 单独分析已捕获的硬链接重建回退，判断是否有可安全消除的保守歧义，不与本次 UUID 变化合并。
+- [ ] 继续跨日观察并单独追踪游标缺失；取得上游证据后再设计修复及回归，保留全部事件可信和原子提交保护。
+
+### 根因调查执行规划（2026-09-30；尚未实施新增采集器）
+
+目标分三层：① 已证实应用因 journal UUID 变化回退；② 将系统日志重建与目标 Data 卷可靠对应；③ 查明系统为何判定日志与卷不同步。仅同时出现两条日志或连续数次成功不足以完成②/③。Apple 的 FSEventsCopyUUIDForDevice 文档说明 UUID 不同表示事件流改变，列出的日志清除、磁盘擦除、事件计数回绕只是可能情形，不能直接套用为本机根因。
+
+#### A. 优先保全现存证据并对齐系统时间线（普通权限优先）
+
+- [ ] 尽早保存当前有界 ScanProbes 日志，以及 2026-09-30 05:55–06:20 的 fseventsd、diskarbitrationd、powerd、kernel 和与 fseventsd 有关的 launchd 日志；再按结果扩展到 00:39–09:01。使用 `log show --info --debug` 读取仍被保留的记录；这两个选项不会追溯生成此前未持久化的日志。
+- [ ] 对齐 `pmset -g log`、系统启动时间、fseventsd 的 PID/进程生命周期和已有崩溃报告，区分实际 sleep/wake、dark wake、仅电源 assertion 释放、挂载/卸载和进程重启。06:07 附近出现 assertion 记录不能自行证明系统睡眠。补记 macOS 版本/build、当前卷组/文件系统身份及磁盘剩余空间；当前状态不能替代事发时状态。
+- [ ] 核对同时间段备份/恢复、系统更新、磁盘/清理工具和用户操作的实际运行证据，特别是是否对事件日志所在卷做过删除、恢复或替换。不得从“安装了某工具”或某进程恰好活跃就判定责任；不递归遍历用户文件。
+- [ ] 建立脱敏证据表：本地/UTC 时间、来源、进程、卷身份、操作、成功/失败及缺失字段。`<private>`、日志保留缺口和丢失记录必须标明，不将“查不到”解释为“没发生”。系统现存日志若无法关联卷，结论仍为高度相关线索。
+
+可在普通终端手动采集的最小命令（新建私有目录，位于 repo 和 DailyDisk 运行目录之外）：
+
+```bash
+umask 077
+DD_DIAG_DIR="$(mktemp -d "$HOME/Library/Logs/DailyDisk-investigation.XXXXXX")"
+/usr/bin/log show --style ndjson --info --debug \
+  --start '2026-09-30 05:55:00+0800' --end '2026-09-30 06:20:00+0800' \
+  --predicate 'process == "fseventsd" OR process == "diskarbitrationd" OR process == "powerd" OR process == "kernel" OR (process == "launchd" AND eventMessage CONTAINS[c] "fseventsd")' \
+  > "$DD_DIAG_DIR/system-window.jsonl"
+pmset -g log | awk '$1 == "2026-09-30" && $2 >= "05:55:00" && $2 <= "06:20:00"' \
+  > "$DD_DIAG_DIR/power-window.txt"
+sw_vers > "$DD_DIAG_DIR/os-version.txt"
+sysctl kern.boottime > "$DD_DIAG_DIR/boot-time.txt"
+printf '%s\n' "$DD_DIAG_DIR"
+```
+
+若某一命令报权限不足，仅对该采集操作按实际报错补充权限；先保留报错，不改系统保护设置。短窗口文本也可能较大，应检查输出体积再决定是否扩大范围。原始材料只在本机私有目录保存，仓库仅存脱敏结论。
+
+#### B. 缩小 UUID 改变窗口并确认目标卷（拟新增独立只读诊断工具）
+
+- [ ] 设计一个显式启动、最多运行 24 小时的临时采样工具，每 60 秒调用一次目标设备的 `FSEventsCopyUUIDForDevice`，并记录时间、单调时间、启动标识、Data 卷/文件系统身份、dev_t 转换、journal UUID、fseventsd 可见 PID 和采样错误。遇到设备/挂载变化重新校验 Data 卷，不把旧设备号当成永久身份。只记录摘要，不读取日志文件内容，不建立库存、不写检查点，也不增加产品常驻 helper 或永久 LaunchAgent。
+- [ ] 日志上限 2 MiB、0700/0600 权限、单写入队列；记录启动配置和停止原因。睡眠期间不阻止休眠，也不假装每分钟都采到了值；唤醒后记录采样空档。UUID 变化只定位到最后旧值和首次新值之间，不能声称精确发生时刻。工具自身 I/O 与睡眠采样缺口须纳入解释。
+- [ ] 工具开始前测试：正常相同 UUID、切换、nil、设备号变化、睡眠式采样空档、写日志失败及期限退出；确认与现有检查并行时不改变业务 fence、权限或检查点。先部署一天，按实际证据决定是否延长，不自动无限续期。
+- [ ] 若允许读取受保护目录，可补充固定 `.fseventsd` 目录及固定身份文件的存在性/元数据，仅用于对应重建时刻；不用递归扫描、轮询文件内容或修改目录。FDA/POSIX/SIP 的实际限制分别记录；读取失败即跳过，不能为此关闭 SIP。
+
+#### C. 只有证据不足时升级系统采集（需要本机管理员参与）
+
+本机已核对 `log help` 和手册；`log config --status --process fseventsd` 返回需要 root。以下操作是调查工具权限，不改变 DailyDisk 无 root helper 的产品模型，也不意味着已开启采集。
+
+| 操作 | 权限/用途 | 限制及退出方式 |
+| --- | --- | --- |
+| 普通 `log show`、`pmset`、现有探针和 UUID API | 先用当前用户，只读时间线和身份 | 当前已能读到 fseventsd 重建记录；受保护文件按实际失败决定是否给运行终端 FDA |
+| `sudo /usr/bin/log collect --last 1h --size 200m --output "$DD_DIAG_DIR/incident.logarchive"` | 管理员，复现后及时保全系统日志 | 按本机工具支持设置 200 MB 收集上限，检查实际磁盘占用；不能恢复已隐藏字段，旧事件使用覆盖其时间的 `--start` 而非固定 last 1h |
+| `sudo /usr/bin/log config --status --process fseventsd` | 管理员，查看当前日志配置 | 如确需 info/debug，先保存原配置，明确只限 fseventsd、最长 24 小时，再配置并恢复原值；不是全局开启 debug |
+| `sudo /usr/bin/fs_usage -w -f filesys -t 120 fseventsd` | 管理员，复现窗口内观察守护进程文件操作/失败 | 最多 120 秒；必须配套私有、有容量限制的接收器再写盘。仅追踪 fseventsd 看不到其他进程删除文件的全部证据，不能据此排除外部操作；不默认整夜全系统追踪 |
+| `sudo /usr/bin/sysdiagnose -f "$DD_DIAG_DIR"` | 管理员，复现后尽快采集系统诊断 | 会额外产生 I/O 和较大文件，无上述 200 MB 上限，先检查空间；手册支持 Ctrl-Option-Command-Shift-句点快捷键触发，默认材料位于 /private/var/tmp。由用户本机输入密码，勿发密码给 agent |
+
+- [ ] 若 `<private>` 是关键障碍，向 Apple 获取适合当前 macOS 的官方日志 profile/采集指导后再安装，记录启用期限及移除方法；不使用未经验证的 `private_data:on` 或承诺 root 能解密历史隐藏字段。本机 `log help config` 没有列出该开关。额外采集的路径/身份只留本机，完成分析后按用户决定删除。
+- [ ] 每次改变日志级别或增加追踪，都先确定范围、磁盘预算和恢复配置的方法，再由用户授权该具体系统变更；当前请求仅完成规划，未修改系统日志设置、安装 profile 或运行管理员采集。
+
+#### D. 用证据决定修复与验收
+
+- 若目标卷确实被系统重建日志，查明前置操作：有确切删除/恢复调用则定位调用者；有实际挂载/睡眠/进程异常则围绕该触发条件复现。只在可丢弃的测试卷/虚拟机重现破坏性操作，不删生产 `.fseventsd`、不 kill 系统守护进程、不重置基线来试错。测试卷结果不能自动等同于启动 Data 卷问题。
+- 若 OS 返回值稳定而数据库/应用身份不一致，转查设备选择、持久化和会话上下文；目前证据支持系统返回 UUID 确实改变，但仍保留对其他时段应用缺陷的检验。
+- 若系统持续自行重建且上游无法从公开诊断中判断，向 Apple Feedback Assistant 提交私有 sysdiagnose、最小时间线、OS build、卷身份对照和只读 UUID 采样复现；原始材料不公开发布，提交前由用户决定。内核/守护进程内部原因可能需要 Apple 分析，不保证靠更多权限即可查明。
+- 验收必须包括目标卷关联、触发条件的独立证据、修复后相同条件下的回归与跨日观察；单日成功或仅有相关时间不足。硬链接歧义继续作为独立分支调查。始终保留 journal UUID、游标、事件丢失和原子检查点保护。
+
+参考：[Apple FSEvents UUID API](https://developer.apple.com/documentation/coreservices/1444453-fseventscopyuuidfordevice)、[Apple Feedback Assistant](https://developer.apple.com/feedback-assistant/)、[Apple Profiles and Logs](https://developer.apple.com/feedback-assistant/profiles-and-logs/)，以及本机 `log help show/config/collect`、`man fs_usage`、`man sysdiagnose`。
+
+### 根因调查执行结果（2026-09-30；新增系统更新线索，尚未定论）
+
+已按规划保存私有探针副本、05:55–06:20 系统/电源记录，并追加 06:07:32–06:07:36 短窗口全进程日志。采集位于本机 `~/Library/Logs/DailyDisk-investigation-20260930/`，原始材料不入库。当前 macOS 为 26.5 / 25F71。现存记录显示 fseventsd 与 diskarbitrationd 自本次系统启动后持续运行；短窗口电源日志没有实际 Sleep/DarkWake/Wake 转换记录，不能将 assertion 变化解释为睡眠。
+
+新增证据链（本地时间）：
+
+1. 06:07:32.840，softwareupdated 报告持久化状态校验失败（SUMacControllerError 7403），随后进入 `PurgeAllAssetsAtStartup` 清理。
+2. 06:07:34.114，系统 `CleanupPreparePathService` 清理未使用的已准备更新；期间多次挂载/卸载 System 卷，并明确记录回退系统更新快照。
+3. 06:07:34.151 起，Disk Arbitration 向 fseventsd 等订阅者发送该 System 卷的 `DAVolumePath` 变化通知。
+4. 06:07:34.894，fseventsd 报告日志与卷不同步并销毁日志；06:07:35.147 生成新 UUID。
+
+这使“软件更新状态恢复/清理和临时 System 挂载触发日志重建”成为优先验证假设，证据比单纯同日活动更具体。但更新服务明确操作的是 System 卷，而已经确认 UUID 改变的是内置 Data 卷；日志重建记录仍隐藏卷身份。**尚缺将两者连成因果链的证据，不能宣称已经确定 macOS 更新服务是根因，也不能据此禁用更新或删除更新状态。** 日志中的负数及计数含义未经验证，不作为已解码的错误原因。
+
+用户补充外接 `/Volumes/Data`：只读检查确认它是外置 USB APFS 卷，与内置 `/System/Volumes/Data` 属于不同设备/容器，设备身份不同，当前 journal UUID 也不同。现存短窗口日志未找到外接设备的挂载/卸载记录；应用旧探针没有其跨夜 UUID 样本。因此暂没有支持“外接盘导致内置卷回退”的证据，但不能排除系统守护进程层面的间接影响。不能因为同名 Data 就合并两个卷，也不能仅靠拔盘后单次成功定责；如需拔盘对照，先由用户安全推出且确认无读写，再做多轮对照。
+
+实施了独立开发诊断工具 `Scripts/observe-event-journal.py`（本机 Python 3，非产品运行依赖）。显式启动，60 秒采样、最长 24 小时、日志上限 2 MiB，私有目录/文件 0700/0600，串行写入，无库存/数据库/检查点写入，无永久 LaunchAgent、无防休眠。记录启动标识、设备/卷身份、UUID、进程 PID、墙上/单调时间与采样空档；每轮重新核对挂载和设备，nil/失败单独记录。限额/期限/信号终止；睡眠时不执行，唤醒后检查期限。采样由 diskutil 的 DeviceNode 对应块设备 rdev 驱动，而非直接采用 `stat("/").st_dev`：本机根路径 stat 呈现 Data 设备，不能拿它冒充 System 采样。mount/设备校验仍是离散观察，不能排除两次调用间极短的挂载变化。
+
+本轮已启动三路 24 小时采样（Data、System、外接 Data），无自动续期。私有输出目录由 `~/Library/Logs/DailyDisk-investigation-20260930/observer-launch.txt` 指示，其中 `observer.pid` 记录 PID；要提前停止，先核对该 PID 对应此脚本，再发送 SIGTERM。观察结束后读取 `samples.jsonl` 的 stopped 记录确认退出。没有更改已安装应用或启动扫描。
+
+验证：4 项独立 Python 合成测试通过，覆盖 UUID/设备变化、nil、根路径设备与块设备差异、睡眠式期限、时钟回退、输出容量/权限/失败；短时本机三路采样通过且按期限退出，三卷得到不同 UUID。首次短时试运行发现本机 diskutil plist 不提供 Mounted 字段，已改为 MountPoint/设备校验后再启动正式采样。24 小时自然变化尚未观测完成，不将启动成功等同根因验收。
+
+权限边界：`sudo -n true` 确认需要密码，固定 `.fseventsd/fseventsd-uuid` 元数据读取被 POSIX 权限拒绝。没有尝试绕过权限、修改日志级别、安装 profile 或运行 root 追踪。若下次复现仍无法关联卷，由用户在本机终端执行规划 C 的有限日志归档/sysdiagnose，或申请 Apple 对当前系统的诊断指导；不要把密码交给 agent。
+
+下一次优先读取三路 UUID 时间线，检查是单卷还是多卷变化，再围绕变化前后软件更新清理、临时挂载及 fseventsd 操作缩小采集窗口。独立继续排查硬链接歧义。当前结论为“确认保护性回退原因，并发现具体上游候选”，不是根因已经修复。
+
+### 多日回退对比与软件更新状态追查（2026-09-30 10:40 截止）
+
+本轮只读查询了 9/24 00:00 至 9/30 10:40 的系统日志。结果保存在此前私有调查目录的 `multiday.jsonl`、`fsevents-coverage.json`、`update-startup.jsonl`、`control-cleanup.jsonl`；原始身份/路径不入库。以下是**查询实际返回的记录**，不是完整系统事件统计。
+
+| 日期（本地） | 已知 DailyDisk 回退 | 本轮返回的 7403 加载失败实例数 | 返回的系统快照回退日志条数 | 能否对应系统 journal 重建时刻 |
+| --- | --- | ---: | ---: | --- |
+| 9/24 | 历史记录为 UUID 变化，手动恢复 | 3 | 7 | 无该日 fseventsd 可读记录，无法对齐 |
+| 9/25 | 历史记录为 UUID 变化，每日增量失败 | 3 | 12 | 同上 |
+| 9/26 | 历史记录为 UUID 变化，每日增量失败 | 5 | 15 | 同上 |
+| 9/27 | 历史记录为硬链接歧义及 mailbox overflow | 12 | 37 | 同上；回退类型本来就不同 |
+| 9/28 | 历史记录为 UUID 变化，每日增量失败 | 12 | 38 | 同上 |
+| 9/29 | 探针：22:58:56 首次硬链接拒绝，23:04:05 选择全量恢复 | 16 | 39 | fseventsd 仅从 20:37:02 可读，此段无 UUID 重建记录 |
+| 9/30 至 10:40 | 00:37 手动增量成功；09:00:09 定时 UUID 拒绝并恢复 | 7 | 19 | 06:07:34.894 重建，06:07:35.147 新 UUID |
+
+7403 计数取 `Failed to load persisted state` 并按 boot/process 实例去重，避免同一错误被五条上层日志重复计数；快照列是日志条数，同一清理可能回退两次，不能解释成独立更新次数。历史回退类型来自此前已记录的实机核查，9/24–9/28 的旧数据库/报告已在获授权的 schema 6 重置中删除；旧日志和备份不在当前数据根内。本轮 DailyDisk Unified Log 查询也未返回记录。因此没有依据补写这些日期的精确回退时分秒，不能直接把 09:00 调度配置当成实际执行时间。
+
+**日志覆盖限制已单独验证：** 对 fseventsd 进行不带错误关键词的整段查询，最早返回 9/29 20:37:02，共返回当晚 2,049 条、9/30 截止 10:40 的 6,148 条；早期没有可读记录。软件更新记录保留更久，所以“早几天有更新清理、没有 fseventsd 重建日志”不能解释为当时没重建。现存 fseventsd 覆盖窗口内返回了 22 条快照回退日志，却只有一次 out-of-sync/new-UUID 记录；说明更新清理不是每次都伴随可见重建。
+
+#### 7403 的具体来源已缩小到缺少更新上下文，而非已证实文件损坏
+
+本轮按同一软件更新进程和线程关联读取记录，避免把并行加载 DDM 状态的日志误当作控制器状态：
+
+- 06:07:32.543，launchd 因 Mach IPC 启动 softwareupdated；现存日志未确定最初调用者，不能断言是用户操作或固定每日任务。
+- 06:07:32.827–32.832，控制器**成功读入** `SoftwareUpdateMacController.state`；结构/版本字段存在，业务 policy 字段只含 `PersistedVersionNumber=25F71`，其余更新对象为空。
+- 06:07:32.835，同一线程明确记录缺少 access control context、update UUID、descriptor、overrides；随即以 SUMacControllerError 7403 拒绝该状态。
+- 06:07:32.841–32.842，控制器自行执行 currentUpdateCancelled、清除状态文件并确认删除成功，然后创建空状态并重新设置 PersistedVersionNumber。因此稍后的“找不到状态文件”是此次主动清除后的结果，不能拿它反证之前文件被外部清理工具删除。
+- 之后进入 PurgeAllAssetsAtStartup / removeAllUpdateContent，CleanupPreparePathService 清理准备更新，临时挂载 System 卷并回退更新快照；随后发生此前已记录的 out-of-sync 和 journal 重建。
+
+07:07:28–07:07:31 的独立对照窗口同样读到只含版本号的状态、缺少同样四个字段、两次回退同一系统快照和多次临时挂载/卸载；该窗口没有 out-of-sync/new-UUID 记录。由此不能宣称“7403 是文件损坏”或“7403/快照回退必然导致 Data journal 重建”。一种待验证解释是无活动更新时保留版本号的状态在启动恢复路径中被判无效并例行清理；这只是对日志的解释，不是对 Apple 内部设计的已证实结论。
+
+当前证据强弱：
+
+1. **已确认：** 今天 DailyDisk 比较的是内置 Data 设备的实际 UUID；UUID 改变导致保护性全量恢复。
+2. **已确认：** 软件更新在 06:07 执行了具体状态恢复/清理与 System 快照操作；fseventsd 几百毫秒后记录不同步和重建。
+3. **尚未确认：** 隐藏卷身份的系统重建是否就是内置 Data 的那一次；System 操作为何影响 Data；为何同类清理的大多数时段未出现重建；最初是谁触发软件更新启动。不能将相关时间线升级为完整因果链。
+
+后续收敛方向：保留正在运行的三路 UUID 采样，在下一次变化时同时确认 Data/System/外接卷是否一起改变；以**未触发变化的同类更新清理为对照**，比较设备映射/挂载状态及日志重建前的文件操作。若还缺日志目录身份和实际 I/O，只增加有限窗口、明确进程范围的管理员追踪或 Apple 指导的诊断，不全局关闭隐私、不删更新状态或 FSEvents 日志、不禁用系统更新来试错。当前没有证据支持把外接 SSD 或某个清理工具定为责任方。
+
+本轮未修改生产代码、应用安装、数据库或系统配置，未触发更新/扫描；仅采集分析及文档更新，空白检查通过。三路观察继续按原 24 小时期限运行，不延长、不重启采样。
+
+### 第二次自然复现与实时证据保全（2026-09-30）
+
+13:21 检查已运行采样时发现问题已自然复现，无需等到明天：10:50:14 的样本仍为旧 UUID，10:51:15 内置 Data 首次变为新 UUID，10:52:15 保持新值；三个样本中 System snapshot 与外接 Data 的 UUID 均不变，fseventsd PID 也未变。每轮三卷串行读取，时间为采样轮开始时间，变化窗口约一分钟，不能将其当作精确原生事件时刻。
+
+及时保全了 10:49–10:52 的系统记录（私有 `second-recurrence.jsonl`）：
+
+- 10:50:49.621，软件更新状态再次因缺少同样四类字段校验失败。
+- 10:50:52.498，CleanupPreparePathService 回退同一系统更新快照。
+- 10:50:53.202，fseventsd 报告 out-of-sync 并销毁旧日志；10:50:53.260 生成新 UUID。第二次快照回退日志位于两者之间。
+- 此事件落在采样确认的内置 Data UUID 变化窗口内；这比第一轮跨夜间隔提供了更强的卷/时间关联，且排除了此次“只有外接盘 UUID 变化被当作 Data”以及守护进程 PID 改变的解释。但重建日志中的卷身份仍隐藏，不能把窄时间关联等同于完整文件操作因果证明。
+
+两个自然复现都伴随同类更新清理，另有未触发可见重建的清理对照。当前优先假设仍是某种临时挂载/快照清理条件触发日志不同步；为何只有部分清理触发，以及对应哪个文件/卷操作，尚待定位。不得承诺“明天一定查清”：可能没有再次复现，也可能关键内核/守护进程信息只有 Apple 能解释。
+
+为避免再等一次却丢失过程，新增并已运行 `Scripts/record-journal-system-log.py`：普通权限 `log stream --level debug`，只筛选 fseventsd、更新状态加载/清理、快照/挂载、Disk Arbitration 卷路径变化与相关进程启动；不改变全局日志级别或隐私配置。串行逐行写入私有目录，2 MiB × 10 文件轮转，总量不超过 20 MiB（不含微小 PID/result 文件），单行过大计数丢弃，期限/信号停止并回收 log 子进程。实时流只能采到系统实际发出的事件，仍可能有系统日志丢失与 `<private>` 字段，不能声称包含全部文件操作。
+
+实时记录器截止时间与已运行的三卷采样对齐，约 10/1 10:32，未延长 UUID 采样期限。输出目录由私有调查目录 `system-recorder-launch.txt` 指示；其中 recorder.pid/result.json 用于核对进程和退出原因。轮转可能覆盖早期记录，故本次两个已知复现窗口已独立保存。只读观察器继续每分钟采样，不引入产品常驻服务，也不主动触发更新或重建。
+
+验证：实时流短时运行可启动并按期限退出；轮转、权限、完整行、容量和关闭后拒绝写入的合成测试通过。三卷采样原有 4 项测试继续通过。管理员 `fs_usage`/sysdiagnose 尚未执行（sudo 需要用户本机认证）；若普通证据仍不足，应在明确范围和容量的前提下补充文件操作追踪或 Apple 指导，不把现有普通权限采集宣称为足以保证根因结论。新的实时采集会产生少量系统事件和 I/O，属于观测扰动，必须纳入比较。
+
+### mailbox 快速失败（2026-09-30）
+
+已实现不可恢复的 mailbox 信任失败的协作式快速退出：历史 drain 前、原生 flush 前、每个实时 drain、consume 前后检查历史/实时 assessment；仅 `fullScanRequired` 触发，`subtreeRescanRequired` 保留原修复路径。即使历史仍未消费完，已经观察到的实时溢出也使本次尝试无效。消费期间通过 TaskLocal 捕获信任检查并包装 mutator 的进度 observer，文件/子树已有协作检查点可及时退出，不必等待整个 4,096 条批次应用结束。当前正在执行的单个同步系统调用/数据库操作不能被立即抢占，不承诺固定毫秒延迟。
+
+退出抛出专用 EventReplayInvalidated，不构造提前完成的可信 fence、不清除丢失标志、不推进游标。session 原有 catch 停止原生事件流；增量层转换成原有 recoveryRequired 错误并执行失败清理，再由 ScanCoordinator 选择恢复。既有取消优先级、旧检查点和原子提交保护保持。全量 E0/E1 的消费也会终止并进入原有失败清理；不会在无可信游标时激活 staging。该修复减少失败后无效工作，不降低事件数量，不解决 UUID 变化或本身的容量不足；mutator 独立身份歧义的处理策略未变。
+
+验证：默认并发全套 254 项通过（3 个 opt-in 跳过），格式、构建、LaunchAgent 和空白检查通过。新增覆盖：HistoryDone 前溢出在下个消费检查点停止、实时丢失中止未完历史、子树重扫标志不误报；恢复端同时覆盖原 fence 拒绝及专用快速失败，断言 session 已 stop、无失败尝试提交、恢复使用旧 generation/cursor 且恢复成功。未更新本机安装。
+
+UUID 采样复查截至 9/30 15:49:51：315 轮、三卷查询零错误；只有 10:50:14–10:51:15 内置 Data 的已知一次变化，随后未观测到新的变化，System/外接 Data 无变化。60 秒离散采样无法证明间隔内绝无短暂变化；现有观察器及实时日志记录器继续运行，未重启或延长期限。
+
+### 历史存储优化与增量调查（第一轮已验收；第二轮 2A 已完成）
+
+以下为历史规划和验收记录；每日增量优先的产品方向已被每日 05:00 全量、同日后续手动增量取代。保留日期、实际运行时间和测量结果，不将其作为当前目标设计。
 
 目标：降低 DailyDisk 的常驻占用和扫描期间的峰值占用，同时保留历史报告、可靠恢复能力和现有扫描性能。以下记录 2026-09-24 的初始测量及 2026-09-28 对最近四天扫描的只读复查，不代表后续实时状态，也不代表优化已经完成。接手时先核对代码和数据状态；已有的扫描、分页及提交性能修复必须保留。实施优先级（2026-09-28 用户调整）：先安全降低磁盘占用，再优化存储结构；连续增量失败的根因排查后置，可信 FSEvents 校验保持不变。
 
@@ -731,7 +981,7 @@ Schema 5、retired 清理、独立维护请求、GUI 状态及空间不足/崩�
 - [x] 内测不转换旧库存，已按用户授权删除旧数据；移除旧版专用提示和任务分支，仅保留迁移层一致性校验。
 - [x] 使用原签名和安装路径替换应用，按授权删除旧运行数据并启动 schema 6 首次基线。
 - [ ] 等待首次报告完成并验证后续增量；启动和进度验证不等同于完整验收。
-- [ ] 游标缺失、跨日日志 UUID 变化的关联诊断仍后置，继续保留既有可信事件保护。
+- [ ] 历史未决项：游标缺失和跨日日志 UUID 变化的深入调查已后置；当前先按每日全量四轮规划推进，继续保留既有可信事件保护。
 
 正式接入验收：默认并发全套报告 244 项通过（3 项 opt-in 跳过），原有生产百万行完整链路另行通过，耗时 242.388 秒。两轮替换、报告和维护后均为 396,828,672 字节；DB/WAL/SHM 采样峰值 1,779,724,288 字节。后续 32 次窄查询/增量提交为 0.0583/0.7536 秒，opaque/diff 为 34.104/10.096 秒，全部通过既定预算。相同生产夹具旧 schema 5 紧凑后为 1,012,027,392 字节，新布局下降约 60.8%；某些单项（增量提交、opaque 拷贝）比历史记录慢，不能宣称所有操作加速。排序缺行/错误路径、失败重试和杀死未提交 SQLite 子进程后恢复均有正式库测试。未替换安装、未重置真实历史；实机落地验收仍待完成。
 格式、构建、LaunchAgent lint、diff 检查及独立开发包深度签名校验/helper dry-run 均通过。开发包为显式 ad-hoc，仅用于验证；后续安装须沿用原持久签名与安装路径。
@@ -765,3 +1015,35 @@ Validation: the new reinstall recovery regression fails against the unmodified m
 Concurrent start requests snapshot a registration revision before awaiting launchctl. If another call changes registration during that await, the missing result is stale: recheck approval/runtime without another unregister. Registration attempts advance the revision before the operation, including failures, so overlapping callers cannot repeatedly repair or terminate a newly started helper. Manual register/unregister also invalidate in-flight observations. Regressions synchronize two missing inspections and cover successful repair, failed registration and a still-missing job.
 
 Review follow-up validation: default concurrent suite passed 250 tests (three opt-in workloads skipped), including the previously failing duplicate-unregister regression. Format, build, LaunchAgent and whitespace checks passed. The earlier APFS discovery failure did not reproduce on this machine; installed missing-registration acceptance remains separate.
+
+PR #4 已于 2026-09-30 合并（merge 578f5ea，修复 2737179）。先修复 actor 重入导致的重复注销，再合入重装后缺失 helper 的恢复逻辑。PR 独立全套 250 项通过；与当前本地探针/快速失败组合及同步后的 main 全套 261 项通过（3 个 opt-in 跳过）。本地待提交源码和新增文件恢复后逐字节校验一致，文档追加冲突保留双方内容。当前未更新本机安装。
+
+### 每日全量设计首轮测量（2026-10-01）
+
+百万条目生产存储压力测试通过（475.784 秒）。新增 Darwin 进程磁盘写入计数：初始 append 1.682 GB，至激活累计 2.911 GB；第二轮 staging/seal/激活/报告 3.769 GB，之后强制清理/验证/VACUUM 另写 2.301 GB。压缩后 DB 396,828,672 字节。计数是进程 I/O，不是 NAND 写放大；夹具不包含真实文件遍历/原生事件回放，不能直接外推本机寿命。设计与完整口径见 `Docs/DailyFullScan.md`。先实施每日 05:00 全量策略及报告语义，第二轮再测试有上限的 WAL checkpoint（当前每次事务后 TRUNCATE）和 512/1024 批次，保留 FULL 持久性及恢复不变量；不将强制压缩改为每日例行步骤。
+
+本轮验证：默认并发全套 261 项通过（3 个 opt-in 跳过），百万条目独立测试通过；格式、构建、LaunchAgent lint 和 diff 检查通过。CI 取消/超时夹具改为 FIFO 阻塞及 ready 握手，移除两秒自然退出与 50 ms 调度假设。仅本地修改，无提交、无云端推送、无本机安装变更；真实例行 helper 的全流程写入采样仍待完成。
+
+
+### 05:00 每日全量规划文档同步（2026-10-01）
+
+已将正式目标及四轮顺序同步至 README、架构、记账、数据库、安装、运维与测试文档。第一轮为调度/全量边界/报告语义，第二轮为有上限的 WAL checkpoint 与批次测量，第三轮为空间维护，第四轮为实机验收。同日后续手动检查尝试增量，可信历史失败则回退全量。旧版 09:00 及七天全量仅作为当前尚未迁移的实现说明或历史证据保留；七天压缩冷却仍有效。此次仅更新文档，未改代码、plist 或安装。格式、构建、LaunchAgent lint、diff 检查通过；默认全套 261 项通过（3 个 opt-in 跳过），不代表新策略已实现或通过验收。
+
+### Daily-full rollout (schema 7, 2026-10-01)
+
+Source now selects daily full at 05:00 by local calendar and actual full/recovery inventory completion date, qualified by a published report. Subsequent same-day manual checks try incremental; advanced recheck forces direct full. Old report payloads/inventory are preserved. Migration 007 adds snapshot-comparison accounting, post-commit inventory completion time and report publication time; absent JSON snapshot bytes decode as zero, and historical timestamps approximate the existing finish/report dates. Report retry must not change an existing publication timestamp. New completion markers are written only after inventory COMMIT. Missing markers conservatively do not satisfy daily work; later report recovery must not invent a new completion day. Never substitute scan start or a proposed checkpoint for success.
+
+Daily E0 starts from the current journal, without yesterday’s history. E0–E1 updates staging only; opaque preservation may open an empty baseline descriptor but must not build/seal an expected-active event inventory. Direct baseline/staging semantic validation uses snapshot change kinds, with no normal-growth correction alerts. Legacy reconciliation reports retain their old meaning. Before activation revalidate volume/device/topology/journal identity; mid-scan trust loss still aborts safely.
+
+Production writer uses bounded WAL checkpoints (32 MiB soft, 128 MiB inter-transaction guard), disabled SQLite auto-checkpointing and FULL durability. A single atomic transaction can exceed those thresholds; pinned readers stop subsequent writes before BEGIN. Final publication/close checkpoints may defer truncation for busy readers; strict CLI remains conservative. Native checkpoint-on-close must not instantiate a Swift statement referring unowned to a deinitializing database. Scanner batches are 1024; cancellation remains checked inside traversal chunks.
+
+Same-fixture 100k A/B measured about 37.6% fewer process writes across three full replacements/deletions for bounded WAL + 1024 batches. This is not a device-wear estimate. Retirement deletion and final forced VACUUM were measured separately; the 24-hour recovery window and seven-day compaction cooldown remain unchanged. Helper start/end and phase probes sample process write counters for a naturally due full run. See Docs/DailyFullScan.md and Docs/Testing.md for measured evidence, fixture corrections and remaining installed acceptance.
+
+Final source validation: clean concurrent suite 275 tests passed (four opt-in workloads disabled), all three final isolated 100k write variants passed, and formatting/LaunchAgent/whitespace checks passed. Original million-row full/incremental/opaque/maintenance regression passed in 436.34 s; new three-cycle daily-path million-row test passed in 200.56 s before the final completion-marker refinement. Final timing/persistence changes were retested in the full suite and 100k variants. Keep the recorded SIGBUS clean-build limitation and the separately fixed unowned-reference destructor failure in Docs/Testing.md; do not report every intermediate run as passing.
+
+Installed acceptance update (2026-10-01): Computer Use access is now working. Removed the old job through Settings, quit the GUI, and installed GUI/helper/CLI together at the original path with the same persistent signing identity. All three designated requirements match and deep strict verification passes. Re-registered through Settings; both GUI and launchd now show 05:00 (Hour 5, Minute 0). The RunAtLoad helper migrated schema 6 to 7, recognized today's published full report, returned skippedNotDue and exited with status 0; no additional inventory scan was launched. Lease-protected comparison preserved the active checkpoint and all nine historical reports. Notification permission remains allowed; the GUI disk-access probe reports three accessible protected locations and zero denials. Overview and the nine-report history page render correctly with paths hidden by default. Fixed the stale advanced-settings seven-day description to daily 05:00 and rebuilt/reinstalled; format, LaunchAgent and whitespace checks pass. The final post-install source suite passed all 275 tests in 7.086 seconds (four opt-in workloads disabled). Installed strict CLI verification also passed: integrity ok, schema 7, zero foreign-key/inventory/report violations and zero abandoned runs. This supersedes the prior Computer Use blocker and not-installed status. The remaining acceptance item is whole-helper write measurement during one naturally due full scan; do not repeat real scans just for benchmarking.
+
+2026-10-02 写入审查验证：仅新增/更新规划文档；格式、构建、LaunchAgent lint、diff 检查通过，默认并发 275 项通过（4 个 opt-in 未启用）。反向索引表示用内存夹具验证，无新真实扫描、压缩、迁移或安装。详见 `Docs/WriteOptimizationReview.md`。
+
+
+2026-10-02 主线发布准备：W6 提升为主要低写入架构，详见 Docs/WriteOptimizationReview.md。新增相同对象/排序映射 no-op UPDATE 防护，membership 返回值、opaque 计数、seal 失效和冲突检测不变。默认并发 276 项通过（7.001 秒，4 个 opt-in 未启用）；格式、构建、LaunchAgent lint、diff 检查及两个开发诊断脚本的 5 项测试通过。此前已验收的 schema 7/05:00/探针改动一并提交；不把小改动宣称为 W6 完成，不更新本机安装或触发扫描。

@@ -203,6 +203,7 @@ public struct DailyReportCoordinator: Sendable {
             previousOverhead = nil
         }
         if let existingArtifactReport = try await reportWriter.existingReport(runID: runID) {
+            let artifacts = try await reportWriter.write(report: existingArtifactReport)
             let commit = try ReportCommit(
                 runID: runID,
                 scope: scope,
@@ -211,12 +212,13 @@ public struct DailyReportCoordinator: Sendable {
                 currentStorageSample: currentStorageSample,
                 previousOverheadSample: previousOverhead,
                 currentOverheadSample: currentOverhead,
-                report: existingArtifactReport
+                report: existingArtifactReport,
+                publishedAt: await clock.now()
             )
             try await store.commitReport(commit)
             return ReportGenerationResult(
                 report: existingArtifactReport,
-                artifacts: try await reportWriter.write(report: existingArtifactReport),
+                artifacts: artifacts,
                 currentSample: currentStorageSample
             )
         }
@@ -275,6 +277,7 @@ public struct DailyReportCoordinator: Sendable {
             physicalDiagnosis: physicalDiagnosis,
             diagnostics: diagnostics
         )
+        let artifacts = try await reportWriter.write(report: report)
         let commit = try ReportCommit(
             runID: runID,
             scope: scope,
@@ -283,9 +286,9 @@ public struct DailyReportCoordinator: Sendable {
             currentStorageSample: currentStorageSample,
             previousOverheadSample: previousOverhead,
             currentOverheadSample: currentOverhead,
-            report: report
+            report: report,
+            publishedAt: await clock.now()
         )
-        let artifacts = try await reportWriter.write(report: report)
         try await store.commitReport(commit)
         return ReportGenerationResult(
             report: report,

@@ -3,6 +3,7 @@ import Foundation
 public enum FullScanMode: Sendable {
     case initial
     case scheduled
+    case daily
     case recovery(RecoveryTrigger)
 }
 
@@ -116,6 +117,7 @@ public struct FullScanCoordinator: Sendable {
             throw FullScanError.invalidVolumeScope
         }
         let previousState = try await store.state(for: volume.id)
+        let comparesSnapshots: Bool = if case .daily = mode { true } else { false }
         switch mode {
         case .initial where previousState != nil:
             throw FullScanError.invalidMode
@@ -139,313 +141,360 @@ public struct FullScanCoordinator: Sendable {
             status: .running,
             startedAt: startedAt
         )
-        try await store.begin(run: run)
-        try await progressTracker.bindRun(run.id)
-        let progress = FullScanProgress()
-        var session: (any EventHistorySession)?
+        return try await ScanProbe.$context.withValue(ScanProbe.context.attempt(run.id, role: executionMode.rawValue)) {
+            ScanProbe.emit(.attemptStarted)
+            ScanProbe.checkpoint(.checkpointRead, previousState?.checkpoint)
+            try await store.begin(run: run)
+            try await progressTracker.bindRun(run.id)
+            let progress = FullScanProgress()
+            var session: (any EventHistorySession)?
 
-        do {
-            let checkpoint: EventStreamCheckpoint?
-            if usesCommittedHistory(mode),
-                let previous = previousState?.checkpoint,
-                let uuid = previous.eventStoreUUID
-            {
-                checkpoint = EventStreamCheckpoint(
-                    eventStoreUUID: uuid,
-                    lastEventID: previous.lastCommittedEventID
+            do {
+                let checkpoint: EventStreamCheckpoint?
+                if usesCommittedHistory(mode),
+                    let previous = previousState?.checkpoint,
+                    let uuid = previous.eventStoreUUID
+                {
+                    checkpoint = EventStreamCheckpoint(
+                        eventStoreUUID: uuid,
+                        lastEventID: previous.lastCommittedEventID
+                    )
+                } else {
+                    checkpoint = nil
+                }
+                var preScanProbe = ScanProbe.context
+                preScanProbe.role = "E0"
+                let openedSession = try await ScanProbe.$context.withValue(preScanProbe) {
+                    try await eventReader.openSession(volume: volume, checkpoint: checkpoint)
+                }
+                session = openedSession
+
+                let expectedTarget = InventoryMutationTarget.expectedActive(volumeID: volume.id)
+                let expectedMutator = IncrementalInventoryMutator(
+                    store: store,
+                    metadataReader: metadataReader,
+                    subtreeScanner: fullScanner
                 )
-            } else {
-                checkpoint = nil
-            }
-            let openedSession = try await eventReader.openSession(volume: volume, checkpoint: checkpoint)
-            session = openedSession
+                try await progressTracker.transition(to: .replayingEvents, mode: executionMode)
+                let historicalFence = try await openedSession.replayHistoricalEvents(
+                    observer: progressTracker
+                ) { batch in
+                    guard usesCommittedHistory(mode) else { return }
+                    let result = try await expectedMutator.apply(
+                        batch: batch,
+                        volume: volume,
+                        target: expectedTarget,
+                        runID: run.id,
+                        observer: progressTracker
+                    )
+                    await progress.record(result)
+                }
+                _ = await progress.normalize(fence: historicalFence)
+                if await progress.requiresRecovery {
+                    throw FullScanError.restartRecovery(await progress.reasons)
+                }
 
-            let expectedTarget = InventoryMutationTarget.expectedActive(volumeID: volume.id)
-            let expectedMutator = IncrementalInventoryMutator(
-                store: store,
-                metadataReader: metadataReader,
-                subtreeScanner: fullScanner
-            )
-            try await progressTracker.transition(to: .replayingEvents, mode: executionMode)
-            let historicalFence = try await openedSession.replayHistoricalEvents(
-                observer: progressTracker
-            ) { batch in
-                guard usesCommittedHistory(mode) else { return }
-                let result = try await expectedMutator.apply(
-                    batch: batch,
+                let rawStartFence = try await openedSession.flushLiveEvents(
+                    observer: progressTracker
+                ) { batch in
+                    guard previousState != nil, !comparesSnapshots else { return }
+                    let result = try await expectedMutator.apply(
+                        batch: batch,
+                        volume: volume,
+                        target: expectedTarget,
+                        runID: run.id,
+                        observer: progressTracker
+                    )
+                    await progress.record(result)
+                }
+                let startFence = await progress.normalize(fence: rawStartFence)
+                if await progress.requiresRecovery {
+                    throw FullScanError.restartRecovery(await progress.reasons)
+                }
+                guard let startUUID = startFence.eventStoreUUID,
+                    let startEventID = startFence.highestFullyDeliveredEventID
+                else {
+                    throw FullScanError.restartRecovery(["Unable to establish pre-scan FSEvents cursor"])
+                }
+
+                await openedSession.stop()
+                session = nil
+                let generation = try await store.createStagingGeneration(
+                    volumeID: volume.id,
+                    runID: run.id,
+                    at: await clock.now()
+                )
+                let authoritativeTarget = InventoryMutationTarget.stagingGeneration(generation.id)
+                try await progressTracker.transition(to: .scanningFiles, mode: executionMode)
+                let fullResult = try await fullScanner.scan(
                     volume: volume,
-                    target: expectedTarget,
                     runID: run.id,
                     observer: progressTracker
-                )
-                await progress.record(result)
-            }
-            _ = await progress.normalize(fence: historicalFence)
-            if await progress.requiresRecovery {
-                throw FullScanError.restartRecovery(await progress.reasons)
-            }
-
-            let rawStartFence = try await openedSession.flushLiveEvents(
-                observer: progressTracker
-            ) { batch in
-                guard previousState != nil else { return }
-                let result = try await expectedMutator.apply(
-                    batch: batch,
-                    volume: volume,
-                    target: expectedTarget,
-                    runID: run.id,
-                    observer: progressTracker
-                )
-                await progress.record(result)
-            }
-            let startFence = await progress.normalize(fence: rawStartFence)
-            if await progress.requiresRecovery {
-                throw FullScanError.restartRecovery(await progress.reasons)
-            }
-            guard let startUUID = startFence.eventStoreUUID,
-                let startEventID = startFence.highestFullyDeliveredEventID
-            else {
-                throw FullScanError.restartRecovery(["Unable to establish pre-scan FSEvents cursor"])
-            }
-
-            await openedSession.stop()
-            session = nil
-            let generation = try await store.createStagingGeneration(
-                volumeID: volume.id,
-                runID: run.id,
-                at: await clock.now()
-            )
-            let authoritativeTarget = InventoryMutationTarget.stagingGeneration(generation.id)
-            try await progressTracker.transition(to: .scanningFiles, mode: executionMode)
-            let fullResult = try await fullScanner.scan(
-                volume: volume,
-                runID: run.id,
-                observer: progressTracker
-            ) { batch in
-                try await store.append(records: batch.records, to: generation.id)
-            }
-            await progress.append(errors: fullResult.errors)
-            let opaqueRoots = fullResult.errors.compactMap { error in
-                error.kind.preservesOpaqueInventory ? error.path : nil
-            }
-            if previousState != nil, !opaqueRoots.isEmpty {
-                try await progressTracker.transition(to: .preservingOpaqueInventory, mode: executionMode)
-                try await store.preserveOpaqueSubtrees(
-                    roots: opaqueRoots,
-                    from: expectedTarget,
-                    to: authoritativeTarget,
-                    for: run.id,
-                    observer: progressTracker
-                )
-            }
-
-            let authoritativeMutator = IncrementalInventoryMutator(
-                store: store,
-                metadataReader: metadataReader,
-                subtreeScanner: fullScanner
-            )
-            let catchupSession = try await eventReader.openSession(
-                volume: volume,
-                checkpoint: EventStreamCheckpoint(
-                    eventStoreUUID: startUUID,
-                    lastEventID: startEventID
-                )
-            )
-            session = catchupSession
-            try await progressTracker.transition(to: .catchingUpEvents, mode: executionMode)
-            let catchupHistoryFence = try await catchupSession.replayHistoricalEvents(
-                observer: progressTracker
-            ) { batch in
-                let authoritativeResult = try await authoritativeMutator.apply(
-                    batch: batch,
-                    volume: volume,
-                    target: authoritativeTarget,
-                    runID: run.id,
-                    observer: progressTracker
-                )
-                await progress.record(authoritativeResult)
-                if previousState != nil {
-                    try await store.copyMutations(
-                        from: authoritativeTarget,
-                        to: expectedTarget,
+                ) { batch in
+                    try await store.append(records: batch.records, to: generation.id)
+                }
+                await progress.append(errors: fullResult.errors)
+                let opaqueRoots = fullResult.errors.compactMap { error in
+                    error.kind.preservesOpaqueInventory ? error.path : nil
+                }
+                if previousState != nil, !opaqueRoots.isEmpty {
+                    try await progressTracker.transition(to: .preservingOpaqueInventory, mode: executionMode)
+                    try await store.preserveOpaqueSubtrees(
+                        roots: opaqueRoots,
+                        from: expectedTarget,
+                        to: authoritativeTarget,
                         for: run.id,
                         observer: progressTracker
                     )
                 }
-            }
-            _ = await progress.normalize(fence: catchupHistoryFence)
-            if await progress.requiresRecovery {
-                throw FullScanError.restartRecovery(await progress.reasons)
-            }
-            let rawLiveFence = try await catchupSession.flushLiveEvents(
-                observer: progressTracker
-            ) { batch in
-                let authoritativeResult = try await authoritativeMutator.apply(
-                    batch: batch,
-                    volume: volume,
-                    target: authoritativeTarget,
-                    runID: run.id,
-                    observer: progressTracker
+
+                let authoritativeMutator = IncrementalInventoryMutator(
+                    store: store,
+                    metadataReader: metadataReader,
+                    subtreeScanner: fullScanner
                 )
-                await progress.record(authoritativeResult)
-                if previousState != nil {
-                    try await store.copyMutations(
-                        from: authoritativeTarget,
-                        to: expectedTarget,
-                        for: run.id,
-                        observer: progressTracker
+                var catchupProbe = ScanProbe.context
+                catchupProbe.role = "E1"
+                let catchupSession = try await ScanProbe.$context.withValue(catchupProbe) {
+                    try await eventReader.openSession(
+                        volume: volume,
+                        checkpoint: EventStreamCheckpoint(
+                            eventStoreUUID: startUUID,
+                            lastEventID: startEventID
+                        )
                     )
                 }
-            }
-            let liveFence = await progress.normalize(fence: rawLiveFence)
-            if await progress.requiresRecovery {
-                throw FullScanError.restartRecovery(await progress.reasons)
-            }
+                session = catchupSession
+                try await progressTracker.transition(to: .catchingUpEvents, mode: executionMode)
+                let catchupHistoryFence = try await catchupSession.replayHistoricalEvents(
+                    observer: progressTracker
+                ) { batch in
+                    let authoritativeResult = try await authoritativeMutator.apply(
+                        batch: batch,
+                        volume: volume,
+                        target: authoritativeTarget,
+                        runID: run.id,
+                        observer: progressTracker
+                    )
+                    await progress.record(authoritativeResult)
+                    if previousState != nil, !comparesSnapshots {
+                        try await store.copyMutations(
+                            from: authoritativeTarget,
+                            to: expectedTarget,
+                            for: run.id,
+                            observer: progressTracker
+                        )
+                    }
+                }
+                _ = await progress.normalize(fence: catchupHistoryFence)
+                if await progress.requiresRecovery {
+                    throw FullScanError.restartRecovery(await progress.reasons)
+                }
+                let rawLiveFence = try await catchupSession.flushLiveEvents(
+                    observer: progressTracker
+                ) { batch in
+                    let authoritativeResult = try await authoritativeMutator.apply(
+                        batch: batch,
+                        volume: volume,
+                        target: authoritativeTarget,
+                        runID: run.id,
+                        observer: progressTracker
+                    )
+                    await progress.record(authoritativeResult)
+                    if previousState != nil, !comparesSnapshots {
+                        try await store.copyMutations(
+                            from: authoritativeTarget,
+                            to: expectedTarget,
+                            for: run.id,
+                            observer: progressTracker
+                        )
+                    }
+                }
+                let liveFence = await progress.normalize(fence: rawLiveFence)
+                if await progress.requiresRecovery {
+                    throw FullScanError.restartRecovery(await progress.reasons)
+                }
 
-            await catchupSession.stop()
-            session = nil
-            try await progressTracker.transition(to: .sealingInventory, mode: executionMode)
-            if previousState != nil {
+                await catchupSession.stop()
+                session = nil
+                try await progressTracker.transition(to: .sealingInventory, mode: executionMode)
+                if previousState != nil, !comparesSnapshots {
+                    try await store.finalizeCanonicalAttribution(
+                        target: expectedTarget,
+                        runID: run.id,
+                        observer: progressTracker,
+                        consume: { _ in }
+                    )
+                }
                 try await store.finalizeCanonicalAttribution(
-                    target: expectedTarget,
+                    target: authoritativeTarget,
                     runID: run.id,
                     observer: progressTracker,
                     consume: { _ in }
                 )
-            }
-            try await store.finalizeCanonicalAttribution(
-                target: authoritativeTarget,
-                runID: run.id,
-                observer: progressTracker,
-                consume: { _ in }
-            )
 
-            try await progressTracker.transition(to: .reconciling, mode: executionMode)
-            let eventChanges: [ChangeRecord]
-            let reconciliationChanges: [ChangeRecord]
-            if previousState != nil {
-                eventChanges = try await store.deriveIncrementalChanges(
-                    target: expectedTarget,
-                    runID: run.id,
-                    observer: progressTracker
+                try await progressTracker.transition(to: .reconciling, mode: executionMode)
+                let snapshotChanges: [ChangeRecord]
+                let eventChanges: [ChangeRecord]
+                let reconciliationChanges: [ChangeRecord]
+                if comparesSnapshots {
+                    snapshotChanges = try await store.deriveSnapshotChanges(
+                        authoritative: authoritativeTarget, runID: run.id, observer: progressTracker
+                    )
+                    eventChanges = []
+                    reconciliationChanges = []
+                } else if previousState != nil {
+                    snapshotChanges = []
+                    eventChanges = try await store.deriveIncrementalChanges(
+                        target: expectedTarget,
+                        runID: run.id,
+                        observer: progressTracker
+                    )
+                    reconciliationChanges = try await store.deriveReconciliationChanges(
+                        expected: expectedTarget,
+                        authoritative: authoritativeTarget,
+                        runID: run.id,
+                        observer: progressTracker
+                    )
+                } else {
+                    snapshotChanges = []
+                    eventChanges = []
+                    reconciliationChanges = []
+                }
+                let reconciliation = try ReconciliationResult(
+                    snapshotChanges: snapshotChanges,
+                    eventChanges: eventChanges,
+                    reconciliationChanges: reconciliationChanges
                 )
-                reconciliationChanges = try await store.deriveReconciliationChanges(
-                    expected: expectedTarget,
-                    authoritative: authoritativeTarget,
+                try await progressTracker.transition(to: .collectingDiagnostics, mode: executionMode)
+                let diagnosticSamples = await collectDiagnosticSamples(
+                    scope: scope,
                     runID: run.id,
-                    observer: progressTracker
+                    progress: progress
                 )
-            } else {
-                eventChanges = []
-                reconciliationChanges = []
-            }
-            let reconciliation = try ReconciliationResult(
-                eventChanges: eventChanges,
-                reconciliationChanges: reconciliationChanges
-            )
-            try await progressTracker.transition(to: .collectingDiagnostics, mode: executionMode)
-            let diagnosticSamples = await collectDiagnosticSamples(
-                scope: scope,
-                runID: run.id,
-                progress: progress
-            )
-            let sample = try await diskUsageSampler.sample(storageDomain: scope.domain)
-            let finishedAt = await clock.now()
-            guard let eventStoreUUID = liveFence.eventStoreUUID else {
-                throw FullScanError.restartRecovery(["FSEvents journal identity disappeared during full scan"])
-            }
-            let newCheckpoint = Checkpoint(
-                volumeID: volume.id,
-                eventStoreUUID: eventStoreUUID,
-                lastCommittedEventID: liveFence.highestFullyDeliveredEventID,
-                activeGenerationID: generation.id,
-                topologyFingerprint: volume.topologyFingerprint,
-                lastSuccessfulIncrementalAt: previousState?.checkpoint.lastSuccessfulIncrementalAt,
-                lastSuccessfulFullScanAt: finishedAt
-            )
-            let commit = try ScanCommit(
-                runID: run.id,
-                runKind: runKind,
-                scope: scope,
-                volumeID: volume.id,
-                activatedGenerationID: generation.id,
-                previousCheckpoint: previousState?.checkpoint,
-                checkpoint: newCheckpoint,
-                eventFence: liveFence,
-                changes: reconciliation.allChanges,
-                storageSamples: [sample],
-                snapshotSamples: diagnosticSamples.snapshots,
-                snapshotObservedVolumeIDs: diagnosticSamples.observedVolumeIDs,
-                overheadSample: diagnosticSamples.overhead,
-                coverage: fullResult.coverage,
-                scanErrors: await progress.scanErrors
-            )
-            try await progressTracker.transition(to: .committing, mode: executionMode)
-            try await store.commit(commit, finishedAt: finishedAt)
-            return FullScanOutcome(
-                runID: run.id,
-                checkpoint: newCheckpoint,
-                reconciliation: reconciliation,
-                storageSample: sample,
-                coverage: fullResult.coverage,
-                snapshotSamples: diagnosticSamples.snapshots,
-                snapshotObservedVolumeIDs: diagnosticSamples.observedVolumeIDs,
-                overheadSample: diagnosticSamples.overhead,
-                scanErrors: await progress.scanErrors
-            )
-        } catch {
-            if let session { await session.stop() }
-            let finishedAt = await clock.now()
-            if isScanCancellation(error) {
-                try? await progressTracker.transition(to: .cancelling, mode: executionMode)
+                let sample = try await diskUsageSampler.sample(storageDomain: scope.domain)
+                let finishedAt = await clock.now()
+                guard let eventStoreUUID = liveFence.eventStoreUUID else {
+                    throw FullScanError.restartRecovery(["FSEvents journal identity disappeared during full scan"])
+                }
+                if comparesSnapshots {
+                    let fresh = try await volumeDiscovery.discoverInternalAPFSVolumes()
+                    guard let current = fresh.volumes.first(where: { $0.id == volume.id }),
+                        current.filesystemUUID == volume.filesystemUUID,
+                        current.storageDomainID == volume.storageDomainID,
+                        current.deviceID == volume.deviceID,
+                        current.mountPath == volume.mountPath,
+                        current.inventoryMode == .full,
+                        current.topologyFingerprint == volume.topologyFingerprint,
+                        current.eventStoreUUID == eventStoreUUID
+                    else { throw FullScanError.restartRecovery(["Volume identity changed during daily full scan"]) }
+                }
+                let newCheckpoint = Checkpoint(
+                    volumeID: volume.id,
+                    eventStoreUUID: eventStoreUUID,
+                    lastCommittedEventID: liveFence.highestFullyDeliveredEventID,
+                    activeGenerationID: generation.id,
+                    topologyFingerprint: volume.topologyFingerprint,
+                    lastSuccessfulIncrementalAt: previousState?.checkpoint.lastSuccessfulIncrementalAt,
+                    lastSuccessfulFullScanAt: finishedAt
+                )
+                let commit = try ScanCommit(
+                    runID: run.id,
+                    runKind: runKind,
+                    scope: scope,
+                    volumeID: volume.id,
+                    activatedGenerationID: generation.id,
+                    previousCheckpoint: previousState?.checkpoint,
+                    checkpoint: newCheckpoint,
+                    eventFence: liveFence,
+                    changes: reconciliation.allChanges,
+                    storageSamples: [sample],
+                    snapshotSamples: diagnosticSamples.snapshots,
+                    snapshotObservedVolumeIDs: diagnosticSamples.observedVolumeIDs,
+                    overheadSample: diagnosticSamples.overhead,
+                    coverage: fullResult.coverage,
+                    scanErrors: await progress.scanErrors,
+                    comparesSnapshots: comparesSnapshots
+                )
+                try await progressTracker.transition(to: .committing, mode: executionMode)
+                ScanProbe.checkpoint(.commitProposed, commit.checkpoint)
+                try await store.commit(commit, finishedAt: finishedAt)
+                if ScanProbe.context.recorder != nil {
+                    ScanProbe.checkpoint(.commitSucceeded, (try? await store.state(for: volume.id))?.checkpoint)
+                }
+                return FullScanOutcome(
+                    runID: run.id,
+                    checkpoint: newCheckpoint,
+                    reconciliation: reconciliation,
+                    storageSample: sample,
+                    coverage: fullResult.coverage,
+                    snapshotSamples: diagnosticSamples.snapshots,
+                    snapshotObservedVolumeIDs: diagnosticSamples.observedVolumeIDs,
+                    overheadSample: diagnosticSamples.overhead,
+                    scanErrors: await progress.scanErrors
+                )
+            } catch {
+                ScanProbe.emit(
+                    .attemptFailed,
+                    fields: [
+                        "cancelled": String(isScanCancellation(error)),
+                        "failureType": String(reflecting: type(of: error)),
+                    ])
+                if let session { await session.stop() }
+                await ScanProbe.context.recorder?.flush()
+                let finishedAt = await clock.now()
+                if isScanCancellation(error) {
+                    try? await progressTracker.transition(to: .cancelling, mode: executionMode)
+                    do {
+                        try await store.interrupt(runID: run.id, finishedAt: finishedAt)
+                        try? await progressTracker.transition(to: .cancelled, mode: executionMode)
+                    } catch let cleanupError {
+                        throw FullScanError.cleanupFailed(
+                            primary: String(describing: error),
+                            cleanup: String(describing: cleanupError)
+                        )
+                    }
+                    throw error
+                }
+                try? await progressTracker.transition(to: .cleaningUpFailedRun, mode: executionMode)
+                let scanFailureRecords = (error as? any InventoryScanFailure)?.scanFailureRecords ?? []
+                let errorRecord = ScanErrorRecord(
+                    runID: run.id,
+                    volumeID: volume.id,
+                    kind: error is FullScanError ? .eventHistory : .other,
+                    path: nil,
+                    errorCode: nil,
+                    message: scanFailureRecords.isEmpty
+                        ? String(describing: error) : "Full inventory was incomplete; see structured scan errors"
+                )
                 do {
-                    try await store.interrupt(runID: run.id, finishedAt: finishedAt)
-                    try? await progressTracker.transition(to: .cancelled, mode: executionMode)
+                    try await store.fail(
+                        runID: run.id, errors: scanFailureRecords + [errorRecord], finishedAt: finishedAt)
                 } catch let cleanupError {
                     throw FullScanError.cleanupFailed(
                         primary: String(describing: error),
                         cleanup: String(describing: cleanupError)
                     )
                 }
+
+                if case FullScanError.restartRecovery = error,
+                    recoveryAttempt < maximumRecoveryAttempts
+                {
+                    let refreshed = try await refreshedVolumeAndScope(
+                        originalVolume: volume,
+                        originalScope: scope
+                    )
+                    return try await execute(
+                        volume: refreshed.volume,
+                        scope: refreshed.scope,
+                        mode: comparesSnapshots ? .daily : .recovery(.eventHistoryLost),
+                        trigger: trigger,
+                        progressTracker: progressTracker,
+                        recoveryAttempt: recoveryAttempt + 1
+                    )
+                }
                 throw error
             }
-            try? await progressTracker.transition(to: .cleaningUpFailedRun, mode: executionMode)
-            let scanFailureRecords = (error as? any InventoryScanFailure)?.scanFailureRecords ?? []
-            let errorRecord = ScanErrorRecord(
-                runID: run.id,
-                volumeID: volume.id,
-                kind: error is FullScanError ? .eventHistory : .other,
-                path: nil,
-                errorCode: nil,
-                message: scanFailureRecords.isEmpty
-                    ? String(describing: error) : "Full inventory was incomplete; see structured scan errors"
-            )
-            do {
-                try await store.fail(runID: run.id, errors: scanFailureRecords + [errorRecord], finishedAt: finishedAt)
-            } catch let cleanupError {
-                throw FullScanError.cleanupFailed(
-                    primary: String(describing: error),
-                    cleanup: String(describing: cleanupError)
-                )
-            }
-
-            if case FullScanError.restartRecovery = error,
-                recoveryAttempt < maximumRecoveryAttempts
-            {
-                let refreshed = try await refreshedVolumeAndScope(
-                    originalVolume: volume,
-                    originalScope: scope
-                )
-                return try await execute(
-                    volume: refreshed.volume,
-                    scope: refreshed.scope,
-                    mode: .recovery(.eventHistoryLost),
-                    trigger: trigger,
-                    progressTracker: progressTracker,
-                    recoveryAttempt: recoveryAttempt + 1
-                )
-            }
-            throw error
         }
     }
 
@@ -503,7 +552,7 @@ public struct FullScanCoordinator: Sendable {
     private func executionMode(for mode: FullScanMode) -> ScanExecutionMode {
         switch mode {
         case .initial: .initialFull
-        case .scheduled: .scheduledFull
+        case .scheduled, .daily: .scheduledFull
         case .recovery: .recoveryFull
         }
     }
@@ -514,7 +563,7 @@ public struct FullScanCoordinator: Sendable {
             true
         case .recovery(.inventoryDrift), .recovery(.interruptedFullScan):
             true
-        case .initial, .recovery:
+        case .initial, .daily, .recovery:
             false
         }
     }
@@ -543,6 +592,7 @@ public struct FullScanCoordinator: Sendable {
         switch mode {
         case .initial: .initialBaseline
         case .scheduled: .weeklyReconciliation
+        case .daily: .dailySchedule
         case .recovery(let trigger):
             switch trigger {
             case .eventHistoryLost: .eventHistoryLost

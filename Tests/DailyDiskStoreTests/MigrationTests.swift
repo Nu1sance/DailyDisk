@@ -148,3 +148,24 @@ func retirementMigrationWindow() throws {
     #expect(try db.scalarInt64("SELECT last_committed_event_id FROM checkpoints") == 123)
     #expect(try db.scalarInt64("SELECT COUNT(*) FROM sqlite_master WHERE name='hybrid_nodes'") == 0)
 }
+
+@Test("Schema seven preserves old payloads and adds publication and snapshot accounting")
+func dailyFullReportMigration() throws {
+    let url = try temporaryDatabaseURL()
+    defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+    let db = try SQLiteDatabase(url: url)
+    try DatabaseMigrator.migrate(db, targetVersion: 6)
+    try db.execute(
+        """
+        INSERT INTO storage_domains VALUES ('domain','disk-test','Test',1);
+        INSERT INTO scan_runs VALUES ('old-run','full','manual','succeeded',1,2,0);
+        INSERT INTO daily_reports VALUES ('old-run','domain',2,10,-3,7,0,8,1,X'010203');
+        """)
+    try DatabaseMigrator.migrate(db)
+    #expect(try db.scalarInt64("SELECT snapshot_compared_delta FROM daily_reports") == 0)
+    #expect(try db.scalarInt64("SELECT published_at FROM daily_reports") == 2)
+    #expect(try db.scalarText("SELECT hex(payload_json) FROM daily_reports") == "010203")
+    #expect(try db.scalarInt64("SELECT reconciliation_correction FROM daily_reports") == -3)
+    #expect(try db.scalarText("PRAGMA integrity_check") == "ok")
+    try DatabaseMigrator.migrate(db)
+}

@@ -22,7 +22,7 @@ The app may replay already delivered FSEvents after a power loss, so inventory o
 
 ## Schema migration
 
-The current application schema is version 6. First launch prepares the local database and applies bundled migrations automatically; source-build users do not install a database server or run SQL setup scripts. The system SQLite library is linked through `CSQLite`.
+The current application schema is version 7. First launch prepares the local database and applies bundled migrations automatically; source-build users do not install a database server or run SQL setup scripts. The system SQLite library is linked through `CSQLite`.
 
 `schema_metadata` records every applied migration version and stable name. `PRAGMA user_version` must exactly match the latest contiguous metadata row before any migration runs. DailyDisk rejects:
 
@@ -188,3 +188,10 @@ The transactional scan, revision seal, ledger, report recovery and checkpoint pr
 ### Installed transition update (2026-09-29)
 
 The user authorized deletion of old inventory and installation with a fresh baseline. The dedicated `InventoryFormatError`, `baselineResetRequired` Control category, GUI message and manual/scheduled compatibility branches have been removed. Earlier reset-prompt descriptions are historical. No conversion or old-checkpoint reuse is implemented. The migration retains only its generic empty-database consistency precondition to prevent destructive table replacement beneath an existing checkpoint.
+
+
+## Planned daily-full write management
+
+Daily full scanning compares baseline canonical objects directly with sealed staging, without duplicating an expected-active event overlay. Commit rederives the snapshot ledger and atomically activates inventory with its trusted E1 checkpoint. Migration 007 adds `daily_reports.snapshot_compared_delta` (old rows default to zero) and `published_at`, plus `scan_runs.inventory_completed_at`. Completion is recorded only after inventory COMMIT; if this follow-up marker cannot be written, a published report alone does not satisfy daily work. New publication times are recorded after artifacts are written; retries retain the original persisted timestamp. Historical rows use `generated_at` because the original publication time was not recorded. This upgrade preserves schema-6 inventory and old report payloads.
+
+SQLite WAL experiments and adopted limits are recorded in [DailyFullScan.md](DailyFullScan.md). FULL durability, writer leases, crash recovery and strict CLI refusal of nonempty WAL remain mandatory. A single atomic transaction can exceed an inter-transaction WAL threshold; do not describe that threshold as a hard cap on transaction size. The 24-hour retired recovery window and seven-day automatic compaction cooldown remain unchanged. No daily unconditional VACUUM is introduced.

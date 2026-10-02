@@ -120,10 +120,12 @@ public enum SpaceAccounting {
                 .filter { $0.source == .reconciliation }
                 .map(\.allocatedDelta)
         )
-        let reconciledIndexedDelta = try AccountingMath.add(
-            eventAttributedDelta,
-            reconciliationCorrection
+        let snapshotComparedDelta = try AccountingMath.sum(
+            ordinaryChanges.lazy.filter { $0.source == .snapshotComparison }.map(\.allocatedDelta)
         )
+        let reconciledIndexedDelta = try AccountingMath.sum([
+            snapshotComparedDelta, eventAttributedDelta, reconciliationCorrection,
+        ])
 
         let recordedDailyDiskOverhead = try AccountingMath.sum(
             changes.lazy
@@ -146,6 +148,7 @@ public enum SpaceAccounting {
         }
 
         return try AccountingSummary(
+            snapshotComparedDelta: snapshotComparedDelta,
             eventAttributedDelta: eventAttributedDelta,
             reconciliationCorrection: reconciliationCorrection,
             reconciledIndexedDelta: reconciledIndexedDelta,

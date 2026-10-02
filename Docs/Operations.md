@@ -14,22 +14,22 @@ The worker is launched by a user-domain SMAppService LaunchAgent. It does not da
 
 ## Schedule and due gate
 
-The embedded schedule is 09:00 local time with `RunAtLoad = true`. The database/report due gate handles:
+Source schedule: **05:00 local time**, `RunAtLoad = true`, with a published-full completion gate. Older installed copies keep their previous registration until GUI/helper and schedule are upgraded together.
 
-- one successful report per local scheduled day
-- login before 09:00 without an unnecessary run when yesterday succeeded
-- catch-up when yesterday was missed
-- immediate first baseline
-- sleep/clock/DST calendar resolution
-- recovery of a committed scan whose report was not yet published
+- Automatically run full when due and no successful full scan/report exists for today's local date.
+- Skip automatic work if a manual or scheduled full already succeeded today, including before 05:00.
+- Before the scheduled time, preserve eligible catch-up for missed work and first-baseline evaluation; do not start unnecessary current-day work when nothing is due.
+- A manual request with no successful full today runs full; subsequent same-day manual checks attempt incremental with safe full fallback.
+- Failed/cancelled work does not satisfy the gate or erase an earlier same-day success. No resident failure retry loop.
+- Recover committed-but-unpublished reports before selecting new work; attach to an active helper rather than duplicate it.
+- Use calendar dates, with tests for midnight, DST and time-zone changes, not a rolling 24-hour full-scan deadline.
 
-Full scans use a rolling 168-hour deadline, not a weekday label. Event loss, journal replacement, topology change, or inventory drift can trigger an earlier recovery full scan.
-
+The old 168-hour reconciliation policy is no longer used for default selection. Daily full scans establish current-journal E0–E1 boundaries instead of replaying old history; incremental checks still require trusted committed history. See [the implementation sequence](DailyFullScan.md#implementation-order).
 The task runs in the logged-in user's domain. It is not a power-on/wake scheduler and cannot run while the Mac is shut down or the user is logged out. GUI closure alone does not stop it. Timings observed locally range from 17 seconds for a small incremental check to about 2 minutes 50 seconds for overnight changes; the initial 2.36-million-path baseline took about 23–24 minutes. These are not service-level guarantees.
 
 ## GUI-first manual operation
 
-Use **概览 → 立即检查** for an unconditional user-requested run. The app starts or attaches to `DailyDiskAgent` without killing it, displays phase/count/elapsed progress, and can be closed safely. Reopening reads persistent progress from the private Control directory. Manual requests bypass the daily due gate but retain initial/incremental/weekly/recovery policy; **设置 → 通用 → 重新完整检查磁盘** explicitly forces full inventory.
+Use **概览 → 立即检查** for an unconditional user-requested run. The app starts or attaches to `DailyDiskAgent` without killing it, displays phase/count/elapsed progress, and can be closed safely. Reopening reads persistent progress from the private Control directory. Manual requests bypass automatic deduplication but use today’s published-full state to choose full versus incremental; **设置 → 通用 → 重新完整检查磁盘** explicitly forces full inventory.
 
 Use **取消检查** before commit. The helper stops FSEvents at a safe boundary, marks the run interrupted, clears staging/overlays, and preserves the prior baseline. During atomic commit/report publication the app displays **正在保存结果，请稍候。此阶段不可取消。**.
 
@@ -54,7 +54,7 @@ For each internal APFS domain:
 1. Register current topology and demote stale full-volume selections.
 2. Recover an unreported committed run before starting another scan.
 3. Check whether a report is due.
-4. Run initial full, scheduled full, or daily incremental policy.
+4. Run an opening/daily full scan when required, or incremental only for a subsequent same-day manual request; fall back to full on untrusted history.
 5. Persist inventory, semantic ledger, diagnostics, samples, generation, and FSEvents checkpoint atomically.
 6. Build and publish a private report pair, then commit the validated report row.
 7. Evaluate alert thresholds and persistent cooldown.
@@ -67,13 +67,13 @@ A domain failure is logged and does not prevent later domains from being process
 
 A full scan does not buffer an entire traversal's live events in memory:
 
-1. Replay existing history and flush a concrete pre-scan cursor `E0`.
+1. Open the current journal without yesterday’s cursor and flush a trusted pre-scan cursor `E0` (daily full). Legacy event-reconciliation recovery may still replay prior history.
 2. Stop that session.
 3. Traverse into a staging generation.
 4. Open a new historical session from `E0`.
-5. Replay scan-time events from the durable journal into staging and expected state.
+5. Replay scan-time events from the durable journal into staging; daily full leaves the previous inventory unchanged for comparison.
 6. Flush a final concrete cursor `E1`.
-7. Seal, reconcile, and atomically activate staging with `E1`.
+7. Seal, compare previous inventory with final staging, revalidate current volume identity, and atomically activate staging with `E1`.
 
 If the journal cannot cover the interval, the staging generation is discarded and a fresh topology/journal recovery is attempted.
 
@@ -186,7 +186,7 @@ Open **设置 → 诊断 → 数据占用**. **刷新占用** reads allocated ma
 
 Temporary free disk space is required (conservative check: twice the database logical size plus 1 GB). If insufficient, compaction is declined with an explicit message. Do not manually delete the SQLite/WAL files to free space. If a scan or report needs recovery, first run a normal check, then retry maintenance. Cleanup/compaction/verification can take minutes and cannot be cancelled after their boundary; the window can be closed and reopened safely. After a helper crash, the next invocation validates SQLite recovery; a manual maintenance request reports interruption rather than automatically repeating VACUUM.
 
-Automatic compaction is limited by the 1 GB / 25% / seven-day thresholds. This does not make the helper resident. Until incremental failures are resolved, full recovery scans still need staging/overlay/WAL space and may reuse or regrow free pages. “本轮自身增长” and “当前数据占用” refer to different times; maintenance never rewrites past accounting. Historical ledger retention and path-dictionary optimization remain future work.
+Automatic compaction is limited by the 1 GB / 25% / seven-day thresholds. This does not make the helper resident. Daily full scanning needs temporary staging/WAL space and can reuse free pages; frequent compaction can force that space to be allocated and written again. Prefer measured free-page reuse rather than daily compression. “本轮自身增长” and “当前数据占用” refer to different times; maintenance never rewrites past accounting. Schema 6 already shares parent/name nodes; further ledger-retention or unchanged-record reuse changes require separate measurements and validation.
 
 Upgrade the GUI and helper together and restart the GUI. Schema 5 is not readable by an older writer; keep the signing identity, bundle ID and installed path stable. This source change does not itself migrate or compact an installed user's database.
 
@@ -203,3 +203,33 @@ The user authorized deletion of old inventory and installation with a fresh base
 After replacing or reinstalling the app, SMAppService can still report enabled while `launchctl print` reports that the helper job is missing. A manual request then remains queued with zero progress, and the GUI eventually shows “检查未完成 / 后台任务没有继续运行”; retrying kickstart alone cannot recreate the job. On a start request, DailyDisk now distinguishes a missing job from a loaded, stopped job and repairs only the enabled-but-missing case with one SMAppService unregister/register cycle. It preserves the queued request, rechecks approval and runtime state, and attaches if RunAtLoad has already started the helper. Unknown inspection errors, registration failures and a still-missing job stop recovery; polling does not become a persistent repair loop. Existing running/idle jobs are not re-registered. No history reset is needed.
 
 Overlapping GUI refresh/start requests share the effect of a registration change: a caller whose missing-job inspection predates another registration attempt rechecks status instead of unregistering again. Failed repair attempts also invalidate stale observations. A later explicit start may retry; there is no automatic repair loop.
+
+## Diagnosing unexpected full recovery
+
+The helper records bounded scan probes by default in the private directory `~/Library/Application Support/DailyDisk/Logs/ScanProbes/`. Files `probe.0.jsonl` (newest) through `probe.19.jsonl` rotate at 1 MiB each, for at most 20 MiB of log content. Directory/file permissions are 0700/0600. Records use fixed event names and allowed fields, with no file paths, names or raw error messages. Treat device, volume and journal identities as private diagnostic data; do not commit the logs.
+
+Start with `policyDecision`: `initialFull`, `periodicFull` and `forcedFull` are expected full scans. An incremental attempt followed by `recoverySelected` is a fallback. Follow process/request/run/attempt/session IDs, including full-scan E0/E1 roles. `recoverySelected` carries the first observed stable reason and ordered distinct subsequent causes from the failed attempt. Compare `checkpointRead`, `journalRead`, `cursorQuery`, `historyDone` and `liveFlush`; the cursor probe records the actual Unix/CF inputs, raw returns and adopted result without adding or substituting cursor queries. `commitProposed` is intent; `commitSucceeded` follows the transaction and records a best-effort read of the committed checkpoint (`present:false` if unavailable).
+
+Wall time, monotonic nanoseconds and process-local enqueue sequence support timeline reconstruction. They do not establish physical causality between concurrent callbacks or across processes. `firstReasonSequence` identifies the first retained reason in a bounded logger context; the ordered cause ledger is separate from log delivery. Correlate recovery-resume records with pending report run IDs after a restart. Normal failure handling drains diagnostics before cleanup, but abrupt termination, rotation and queue saturation can still lose evidence.
+
+Both manual and scheduled helper work use the same recorder. Summary mode samples callback totals every 1,024 callbacks and at fences/stop; detailed mode adds rate-limited batch summaries (at most once per second per source). Set `DAILYDISK_SCAN_PROBE_DETAIL=1` in the actual helper environment to enable detail, or `DAILYDISK_SCAN_PROBES=0` to disable logging. A shell environment setting does not configure an already running or launchd-started helper. Dry-run creates no probe logs. No GUI preference or persistent background worker is added.
+
+The pending diagnostic queue holds at most 512 records; critical reasons preferentially displace ordinary summaries. `droppedDiagnostics` and `writeFailures` describe diagnostic delivery, not FSEvents loss. A saturated all-critical queue can also drop reasons. Logging failures do not change trust, accounting or checkpoint activation. Mailbox event pressure, consumption duration and stop records help distinguish overflow during callbacks from later processing; inode/link ambiguity probes contain only identities and counts.
+
+The probes are instrumentation, not a fix for journal UUID changes or missing cursors. After deployment, observe same-day checks and naturally occurring cross-day/reboot/sleep transitions before assigning a root cause. Do not interrupt an active scan to install this update or relax journal, cursor, hard-link or event-loss protections to obtain incremental success.
+
+## Temporary cross-volume journal observation
+
+For a developer investigation on macOS with Python 3 available, run `python3 Scripts/observe-event-journal.py --hours 24 --include-external-data`. This optional tool is separate from the installed app and requires no new production dependency. It samples internal Data, the mounted System snapshot, and optionally the fixed `/Volumes/Data` mount every 60 seconds; output is private under `~/Library/Logs/DailyDisk-journal-*/`, capped at 2 MiB. It exits on deadline, capacity or SIGTERM and never writes inventory/checkpoints or prevents sleep. Inspect `observer.pid` and verify the process command before signalling it. Sleep creates explicit time gaps; expiry is enforced when execution resumes. It observes the mounted System snapshot, not an unmounted underlying System volume.
+
+Use `PYTHONDONTWRITEBYTECODE=1 python3 Scripts/test-observe-event-journal.py` for synthetic checks. UUID changes identify a changed event stream, not its upstream cause. Compare with system logs and retain raw identities only in private local evidence.
+
+For finite live system evidence, `python3 Scripts/record-journal-system-log.py --seconds 3600` streams narrowly selected journal/update/mount messages without changing logging configuration. Private `system.0.jsonl` is newest, rotating through `system.9.jsonl`; total content is capped at 20 MiB. The stream may contain a non-JSON startup line, system loss notices and private redactions. Preserve an incident window before rotation removes it. `result.json` records stop reason and oversized-line drops; SIGTERM stops its child stream too. This is a diagnostic recorder, not a guarantee of complete causal evidence. Test with `PYTHONDONTWRITEBYTECODE=1 python3 Scripts/test-record-journal-system-log.py`.
+
+Mailbox trust loss now aborts replay cooperatively before consuming further queued history, including when live events overflow during historical consumption. Existing mutation/subtree progress checkpoints also check replay trust; a currently executing native or database operation must return first. The stream is stopped and the uncommitted attempt cleaned up before recovery. No early trusted fence or checkpoint is published. This reduces wasted work after fatal loss, but does not prevent overflow or journal replacement. Recursive subtree repair requests alone do not trigger this abort.
+
+## Daily-full write telemetry
+
+Private ScanProbes records include optional `processWriteBytes` on helper start/end, request start/end and phase changes. Counters are sampled when the event is enqueued, not when the log queue writes it. Compare only records with the same process identity; a missing field means the OS counter was unavailable. These are process-attributed disk writes, not file allocation or SSD NAND wear, and exclude notification child processes. They enable one naturally due full-run acceptance without repeatedly scanning user data.
+
+Schema 7 preserves schema-6 inventory and historical reports. The old schema-6 reset instructions above describe the earlier beta transition and must not be repeated for this upgrade.

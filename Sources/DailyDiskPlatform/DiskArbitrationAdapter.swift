@@ -81,29 +81,52 @@ extension EventStoreUUIDIdentifying {
 }
 
 public struct SystemEventStoreUUIDProvider: EventStoreUUIDIdentifying {
-    public init() {}
+    private let queryBeforeTime: @Sendable (dev_t, Double) -> UInt64
+    public init() {
+        queryBeforeTime = { FSEventsGetLastEventIdForDeviceBeforeTime($0, $1) }
+    }
+    init(queryBeforeTime: @escaping @Sendable (dev_t, Double) -> UInt64) {
+        self.queryBeforeTime = queryBeforeTime
+    }
 
     public func eventStoreUUID(deviceID: UInt64) -> UUID? {
-        guard let nativeDeviceID = nativeDeviceID(from: deviceID),
-            let value = FSEventsCopyUUIDForDevice(nativeDeviceID)
-        else { return nil }
-        let string = CFUUIDCreateString(kCFAllocatorDefault, value) as String
-        return UUID(uuidString: string)
+        let native = nativeDeviceID(from: deviceID)
+        let value = native.flatMap { FSEventsCopyUUIDForDevice($0) }
+        let result = value.flatMap { UUID(uuidString: CFUUIDCreateString(kCFAllocatorDefault, $0) as String) }
+        ScanProbe.emit(
+            .journalRead,
+            fields: [
+                "device": String(deviceID),
+                "nativeDevice": native.map { String($0) } ?? "nil", "journalUUID": result?.uuidString ?? "nil",
+            ])
+        return result
     }
 
     public func latestEventID(deviceID: UInt64) -> UInt64? {
-        guard let nativeDeviceID = nativeDeviceID(from: deviceID) else { return nil }
+        guard let native = nativeDeviceID(from: deviceID) else {
+            ScanProbe.emit(.cursorQuery, fields: ["device": String(deviceID), "nativeDevice": "nil", "adopted": "nil"])
+            return nil
+        }
         let unixTime = Date().timeIntervalSince1970
-        let value = FSEventsGetLastEventIdForDeviceBeforeTime(nativeDeviceID, unixTime)
-        if value != 0 { return value }
-        // Older SDK documentation described this parameter as CFAbsoluteTime;
-        // retain a conservative fallback for systems using that epoch.
-        let fallback = FSEventsGetLastEventIdForDeviceBeforeTime(
-            nativeDeviceID,
-            CFAbsoluteTimeGetCurrent()
-        )
-        return fallback == 0 ? nil : fallback
+        let value = queryBeforeTime(native, unixTime)
+        var cfTime: Double?
+        var fallback: UInt64?
+        if value == 0 {
+            cfTime = CFAbsoluteTimeGetCurrent()
+            fallback = queryBeforeTime(native, cfTime!)
+        }
+        let selected = value != 0 ? value : (fallback ?? 0)
+        ScanProbe.emit(
+            .cursorQuery,
+            fields: [
+                "device": String(deviceID), "nativeDevice": String(native),
+                "unixTime": String(unixTime), "unixResult": String(value),
+                "fallbackExecuted": String(fallback != nil), "cfTime": cfTime.map { String($0) } ?? "nil",
+                "cfResult": fallback.map { String($0) } ?? "nil", "adopted": selected == 0 ? "nil" : String(selected),
+            ])
+        return selected == 0 ? nil : selected
     }
+
 }
 
 public struct SystemDiskArbitrationAdapter: DiskArbitrationProviding {

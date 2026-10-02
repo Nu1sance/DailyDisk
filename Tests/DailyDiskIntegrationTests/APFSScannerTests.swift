@@ -212,8 +212,8 @@ func scannerReportsProgressCounters() async throws {
     #expect(counters.indexedObjects < counters.visitedPaths)
 }
 
-@Test("Scanner cancellation is observed within a bounded directory chunk")
-func scannerCancellationIsBounded() async throws {
+@Test("Scanner cancellation is observed within a bounded directory chunk", arguments: [512, 1024])
+func scannerCancellationIsBounded(batchSize: Int) async throws {
     let fixture = try ScannerFixture()
     defer { fixture.remove() }
     for index in 0..<300 {
@@ -222,7 +222,7 @@ func scannerCancellationIsBounded() async throws {
     let observer = WorkObserverProbe(cancelAfterCheckpoint: 4)
     let scanner = FileInventoryScanner(
         configuration: try FileInventoryScannerConfiguration(
-            batchSize: 1_024,
+            batchSize: batchSize,
             managedAbsolutePaths: [],
             validateMountIdentity: false
         )

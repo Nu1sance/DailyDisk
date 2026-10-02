@@ -871,6 +871,7 @@ public actor RunControlStore: ScanProgressReporting, ScanCancellationChecking, S
         let modeIsContinuous =
             previous.mode == nil || previous.mode == current.mode
             || (current.phase == .preparing && current.mode == .recoveryFull)
+            || (previous.phase == .publishingReport && current.phase == .preparing)
             || isNextDomain
         let domainCountIsContinuous =
             previous.domainCount == nil

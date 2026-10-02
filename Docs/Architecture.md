@@ -15,7 +15,7 @@ The user LaunchAgent is not a daemon. It runs a due scheduled scan or a claimed 
 
 Scheduled and manual workers share progress and cancellation; the scheduled worker claims its control identity after acquiring the writer lease. The persisted progress trigger routes interrupted scheduled work back through the due gate/report recovery. The GUI writes versioned fixed-schema JSON under the private `Application Support/DailyDisk/Control` directory (0700; files 0600). `DailyDiskAgent` atomically claims pending requests, binds them to a SQLite run UUID, and publishes path-free snapshots containing only trigger/mode/phase/time/domain ordinal and counters. Atomic temp-file/fsync/rename writes and a cross-process flock prevent half JSON.
 
-A manual request bypasses only `DueTimeGate`; `ScanPolicy` still selects initial full, incremental, seven-day full, or recovery. The GUI starts launchd with `kickstart` **without `-k`**, attaches to an existing helper/writer, and reconstructs running/cancelling/finishing state after restart. A PID-scoped idle handshake prevents requests arriving during helper shutdown from being stranded.
+Automatic work performs one successful daily full at 05:00; manual work performs full if none completed today with a published report, otherwise attempts incremental with full fallback. Completion day is the inventory post-commit day, with report publication required; delayed publication does not shift it. `DueTimeGate` and `ScanPolicy` use the same local calendar. Daily success is derived from published reports joined to successful full/recovery runs, so later incremental or failed runs cannot erase it. The GUI starts launchd with `kickstart` **without `-k`**, attaches to an existing helper/writer, and reconstructs running/cancelling/finishing state after restart. A PID-scoped idle handshake prevents requests arriving during helper shutdown from being stranded.
 
 Cancellation is cooperative through a throttled `ScanWorkObserving` tracker at FSEvents, directory chunks, record batches, SQLite pages, canonicalization, and reconciliation. Before commit, the control store atomically checks cancellation and publishes `.committing`. SQLite generation/checkpoint commit then runs without cancellation points. Interrupted runs delete overlays/staging while retaining the old active generation/checkpoint.
 
@@ -53,6 +53,10 @@ Only full-inventory mounted volumes retain an FSEvents UUID. Metrics-only System
 ## Command execution
 
 External system commands are invoked by absolute path without a shell. `SystemProcessRunner` captures output in private temporary files, executes blocking process work on a dedicated OS thread, enforces a per-request timeout, propagates task cancellation, sends graceful termination first, and escalates to `SIGKILL` after a bounded grace period.
+
+## Daily-full refactor boundaries
+
+The daily-full path starts from a trusted current-journal E0, traverses staging, applies E0–E1 changes and compares final staging with previous committed inventory. It neither replays yesterday’s history nor builds/seals an event-maintained expected inventory. Opaque preservation reads the unchanged baseline through the existing bounded pager; its empty target descriptor does not imply an event-maintained overlay. Final topology/device/journal identity is rechecked before activation. Legacy scheduled reconciliation and incremental-recovery diagnostics retain their old path for compatibility; they are not the default daily policy.
 
 ## Full inventory scanning
 

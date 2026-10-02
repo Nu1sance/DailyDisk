@@ -57,6 +57,7 @@ public actor IncrementalInventoryMutator {
         runID: ScanRun.ID,
         observer: any ScanWorkObserving
     ) async throws -> InventoryMutationResult {
+        let observer = EventReplayGuard.observing(observer)
         var assessment = EventTrustAssessment(trust: .trusted)
         var affected = 0
         var affectedEventPaths: Set<RelativePath> = []
@@ -114,10 +115,22 @@ public actor IncrementalInventoryMutator {
                 previous.object.kind == .regular,
                 previous.object.linkCount > 1 || current.object.linkCount > 1
             {
+                ScanProbe.emit(
+                    .identityAmbiguity, reason: .hardLinkRecreated,
+                    fields: [
+                        "flags": String(event.flags.rawValue), "oldLinks": String(previous.object.linkCount),
+                        "newLinks": String(current.object.linkCount), "sameIdentity": "true",
+                        "oldDevice": String(previous.object.identity.deviceID),
+                        "oldInode": String(previous.object.identity.inode),
+                        "newDevice": String(current.object.identity.deviceID),
+                        "newInode": String(current.object.identity.inode),
+                    ])
                 assessment = assessment.merging(
                     EventTrustAssessment(
                         trust: .fullScanRequired,
-                        reasons: ["A hard-linked path was removed and recreated before identity could be disambiguated"]
+                        reasons: [
+                            "A hard-linked path was removed and recreated before identity could be disambiguated"
+                        ], probeReason: .hardLinkRecreated
                     )
                 )
                 continue
@@ -132,10 +145,18 @@ public actor IncrementalInventoryMutator {
                 let survivingAliases = try await store.paths(
                     target: target, runID: runID, objectIdentity: current.object.identity)
                 if !survivingAliases.isEmpty {
+                    ScanProbe.emit(
+                        .identityAmbiguity, reason: .inodeReuse,
+                        fields: [
+                            "flags": String(event.flags.rawValue), "remainingAliases": String(survivingAliases.count),
+                            "device": String(current.object.identity.deviceID),
+                            "inode": String(current.object.identity.inode),
+                            "newLinks": String(current.object.linkCount),
+                        ])
                     assessment = assessment.merging(
                         EventTrustAssessment(
                             trust: .fullScanRequired,
-                            reasons: ["Possible inode reuse with surviving indexed aliases"]
+                            reasons: ["Possible inode reuse with surviving indexed aliases"], probeReason: .inodeReuse
                         )
                     )
                     continue

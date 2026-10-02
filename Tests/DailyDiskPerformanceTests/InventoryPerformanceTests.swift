@@ -14,6 +14,7 @@ private actor PerformanceCounter {
     .enabled(if: ProcessInfo.processInfo.environment["DAILYDISK_RUN_STRESS"] == "1")
 )
 func millionRecordInventory() async throws {
+    let ioStart = try diskWriteBytes()
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("DailyDiskMillionRow", isDirectory: true)
         .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -96,6 +97,7 @@ func millionRecordInventory() async throws {
         try await store.append(records: records, to: generation.id)
     }
 
+    print("WRITE_METRIC initial-append bytes=\(try diskWriteBytes() - ioStart)")
     let removedCount = 128
     let removals = try (0..<removedCount).map { index in
         InventoryMutation.remove(
@@ -144,6 +146,7 @@ func millionRecordInventory() async throws {
     )
     await peaks.setPhase("initial-commit")
     try await store.commit(commit, finishedAt: finishedAt)
+    print("WRITE_METRIC initial-through-commit bytes=\(try diskWriteBytes() - ioStart)")
     let state = try await store.state(for: volume.id)
     #expect(state?.checkpoint == checkpoint)
     let reportStore = try SQLiteReportStore(databaseURL: root.appendingPathComponent("DailyDisk.sqlite"))
@@ -248,6 +251,7 @@ func millionRecordInventory() async throws {
     // Repeat authoritative activation, retirement, expiry and native compaction.
     // Daily incremental failure is intentionally not fixed by this workload.
     for cycle in 0..<2 {
+        let cycleIO = try diskWriteBytes()
         await peaks.setPhase("cycle-\(cycle + 1)-staging-and-seal")
         let cycleRun: ScanRun
         let cycleGeneration: InventoryGeneration
@@ -290,9 +294,12 @@ func millionRecordInventory() async throws {
         try await publish(cycleRun.id, sample: sample, previous: previousSample)
         let retained = try await reportStore.spaceUsage()
         await peaks.setPhase("cycle-\(cycle + 1)-maintenance")
+        let maintenanceIO = try diskWriteBytes()
+        print("WRITE_METRIC cycle-\(cycle + 1)-before-maintenance bytes=\(maintenanceIO - cycleIO)")
         let maintenanceStart = Date()
         try await store.maintainSpace(at: Date().addingTimeInterval(86410), force: true, availableBytes: { Int64.max })
         let maintenanceSeconds = Date().timeIntervalSince(maintenanceStart)
+        print("WRITE_METRIC cycle-\(cycle + 1)-forced-maintenance bytes=\(try diskWriteBytes() - maintenanceIO)")
         let compacted = try await reportStore.spaceUsage()
         #expect(compacted.allocatedBytes < retained.allocatedBytes)
         #expect(try await store.state(for: volume.id)?.checkpoint == next)
@@ -436,4 +443,16 @@ private struct PerformanceDeadlineObserver: ScanWorkObserving {
         try Task.checkCancellation()
         guard Date() < deadline else { throw CancellationError() }
     }
+}
+
+// Run this workload alone: these are process-wide kernel I/O counters, not NAND writes.
+private func diskWriteBytes() throws -> UInt64 {
+    var info = rusage_info_v2()
+    let result = withUnsafeMutablePointer(to: &info) { pointer in
+        pointer.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) {
+            proc_pid_rusage(getpid(), RUSAGE_INFO_V2, $0)
+        }
+    }
+    try #require(result == 0, "Kernel process I/O counters must be available")
+    return info.ri_diskio_byteswritten
 }

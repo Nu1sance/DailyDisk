@@ -595,6 +595,7 @@ public enum ChangeSource: String, Codable, CaseIterable, Sendable {
     case baseline
     case fsevents
     case reconciliation
+    case snapshotComparison
 }
 
 public enum ChangeKind: String, Codable, CaseIterable, Sendable {
@@ -610,9 +611,15 @@ public enum ChangeKind: String, Codable, CaseIterable, Sendable {
     case reconciliationRemoval
     case reconciliationCorrection
     case reconciliationAttributionTransfer
+    case snapshotAddition
+    case snapshotRemoval
+    case snapshotModification
+    case snapshotAttributionTransfer
 
     public var source: ChangeSource {
         switch self {
+        case .snapshotAddition, .snapshotRemoval, .snapshotModification, .snapshotAttributionTransfer:
+            .snapshotComparison
         case .baseline:
             .baseline
         case .eventCreated, .eventRemoved, .eventModified, .eventMoved, .eventLinkAdded, .eventLinkRemoved,
@@ -748,13 +755,16 @@ public struct ChangeRecord: Codable, Equatable, Sendable {
         case (.baseline, .objectTransition(before: nil, after: .some)):
             isValid = pathBefore == nil && pathAfter != nil
         case (.eventCreated, .objectTransition(before: nil, after: .some)),
-            (.reconciliationAddition, .objectTransition(before: nil, after: .some)):
+            (.reconciliationAddition, .objectTransition(before: nil, after: .some)),
+            (.snapshotAddition, .objectTransition(before: nil, after: .some)):
             isValid = pathBefore == nil && pathAfter != nil
         case (.eventRemoved, .objectTransition(before: .some, after: nil)),
-            (.reconciliationRemoval, .objectTransition(before: .some, after: nil)):
+            (.reconciliationRemoval, .objectTransition(before: .some, after: nil)),
+            (.snapshotRemoval, .objectTransition(before: .some, after: nil)):
             isValid = pathBefore != nil && pathAfter == nil
         case (.eventModified, .objectTransition(before: .some, after: .some)),
-            (.reconciliationCorrection, .objectTransition(before: .some, after: .some)):
+            (.reconciliationCorrection, .objectTransition(before: .some, after: .some)),
+            (.snapshotModification, .objectTransition(before: .some, after: .some)):
             isValid = pathBefore != nil && pathAfter != nil
         case (.eventMoved, .pathOnly):
             isValid = pathBefore != nil && pathAfter != nil
@@ -763,7 +773,8 @@ public struct ChangeRecord: Codable, Equatable, Sendable {
         case (.eventLinkRemoved, .pathOnly):
             isValid = pathBefore != nil && pathAfter == nil
         case (.eventAttributionTransfer, .attributionTransfer),
-            (.reconciliationAttributionTransfer, .attributionTransfer):
+            (.reconciliationAttributionTransfer, .attributionTransfer),
+            (.snapshotAttributionTransfer, .attributionTransfer):
             isValid = pathBefore != nil && pathAfter != nil
         default:
             isValid = false
@@ -1014,6 +1025,7 @@ public struct RankedPathChange: Codable, Equatable, Sendable {
 }
 
 public struct AccountingSummary: Codable, Equatable, Sendable {
+    public let snapshotComparedDelta: Int64
     public let eventAttributedDelta: Int64
     public let reconciliationCorrection: Int64
     public let reconciledIndexedDelta: Int64
@@ -1022,6 +1034,7 @@ public struct AccountingSummary: Codable, Equatable, Sendable {
     public let physicalUnattributedDelta: Int64?
 
     public init(
+        snapshotComparedDelta: Int64 = 0,
         eventAttributedDelta: Int64,
         reconciliationCorrection: Int64,
         reconciledIndexedDelta: Int64,
@@ -1029,7 +1042,10 @@ public struct AccountingSummary: Codable, Equatable, Sendable {
         physicalUsedDelta: Int64?,
         physicalUnattributedDelta: Int64?
     ) throws {
-        guard try AccountingMath.add(eventAttributedDelta, reconciliationCorrection) == reconciledIndexedDelta else {
+        guard
+            try AccountingMath.sum([snapshotComparedDelta, eventAttributedDelta, reconciliationCorrection])
+                == reconciledIndexedDelta
+        else {
             throw ModelValidationError.inconsistentAccountingSummary
         }
 
@@ -1045,6 +1061,7 @@ public struct AccountingSummary: Codable, Equatable, Sendable {
             throw ModelValidationError.inconsistentAccountingSummary
         }
 
+        self.snapshotComparedDelta = snapshotComparedDelta
         self.eventAttributedDelta = eventAttributedDelta
         self.reconciliationCorrection = reconciliationCorrection
         self.reconciledIndexedDelta = reconciledIndexedDelta
@@ -1054,6 +1071,7 @@ public struct AccountingSummary: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
+        case snapshotComparedDelta
         case eventAttributedDelta
         case reconciliationCorrection
         case reconciledIndexedDelta
@@ -1065,6 +1083,7 @@ public struct AccountingSummary: Codable, Equatable, Sendable {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         try self.init(
+            snapshotComparedDelta: container.decodeIfPresent(Int64.self, forKey: .snapshotComparedDelta) ?? 0,
             eventAttributedDelta: container.decode(Int64.self, forKey: .eventAttributedDelta),
             reconciliationCorrection: container.decode(Int64.self, forKey: .reconciliationCorrection),
             reconciledIndexedDelta: container.decode(Int64.self, forKey: .reconciledIndexedDelta),

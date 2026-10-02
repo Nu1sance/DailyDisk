@@ -7,11 +7,14 @@ import Testing
 
 private struct CoordinatorLatestReportReader: LatestReportReading {
     let date: Date?
+    let databaseURL: URL
 
-    func latestSuccessfulReportDate(
+    func latestSuccessfulFullReportDate(
         for storageDomainID: StorageDomain.ID
     ) async throws -> Date? {
-        date
+        if let date { return date }
+        return try await SQLiteReportStore(databaseURL: databaseURL).latestSuccessfulFullReportDate(
+            for: storageDomainID)
     }
 }
 
@@ -185,17 +188,21 @@ private struct CoordinatorFixture {
         reportWriter: any ReportWriting = CoordinatorReportWriter(),
         retentionHandler: DailyDiskRunCoordinator.RetentionHandler? = nil,
         errorProbe: CoordinatorErrorProbe? = nil,
-        progressFactory: @escaping DailyDiskRunCoordinator.ProgressFactory = { _, _, _, _ in NoopScanProgressTracker() }
+        progressFactory: @escaping DailyDiskRunCoordinator.ProgressFactory = { _, _, _, _ in NoopScanProgressTracker()
+        },
+        eventReader: (any EventHistoryReading)? = nil,
+        policy: ScanPolicy = .default
     ) throws -> DailyDiskRunCoordinator {
         let discovery = CoordinatorDiscovery(topology: topology)
         return DailyDiskRunCoordinator(
             store: store,
-            reportReader: CoordinatorLatestReportReader(date: latestReportDate),
+            reportReader: CoordinatorLatestReportReader(date: latestReportDate, databaseURL: databaseURL),
             discovery: discovery,
-            eventReader: CoordinatorEventReader(
-                volumeID: volume.id,
-                eventStoreUUID: volume.eventStoreUUID!
-            ),
+            eventReader: eventReader
+                ?? CoordinatorEventReader(
+                    volumeID: volume.id,
+                    eventStoreUUID: volume.eventStoreUUID!
+                ),
             metadataReader: CoordinatorMetadataReader(),
             fileScanner: FileInventoryScanner(
                 configuration: try FileInventoryScannerConfiguration(
@@ -211,6 +218,7 @@ private struct CoordinatorFixture {
                 ),
                 reportWriter: reportWriter
             ),
+            scanPolicy: policy,
             progressFactory: progressFactory,
             scheduledReportHandler: { _ in await notificationProbe.record() },
             retentionHandler: retentionHandler,
@@ -293,6 +301,7 @@ func committedManualResumeDoesNotRescan() async throws {
     let reader = try SQLiteReportStore(databaseURL: fixture.databaseURL)
     let committedRun = try #require(try await reader.recentRuns().first)
     #expect(committedRun.status == .succeeded)
+    #expect(try await reader.latestSuccessfulFullReportDate(for: fixture.domain.id) == nil)
     #expect(try await fixture.store.latestUnreportedBasis(storageDomainID: fixture.domain.id) != nil)
 
     let recovering = try fixture.makeCoordinator(
@@ -475,4 +484,190 @@ func scheduledPublicationRecoveryWithControl() async throws {
     try await control.complete(summary)
     #expect(await control.channelError() == nil)
     #expect(try await reader.recentRuns().count == 1)
+}
+
+@Test(
+    "Coordinator probes distinguish initial, incremental and forced full with committed basis",
+    arguments: [false, true])
+func coordinatorProbeDecisions(enabled: Bool) async throws {
+    let fixture = try await CoordinatorFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let sink = ProbeCollector()
+    let context = ScanProbeContext(recorder: enabled ? sink : nil)
+    let coordinator = try fixture.makeCoordinator(
+        latestReportDate: nil, notificationProbe: CoordinatorNotificationProbe())
+    for mode in [DailyDiskRequestedScanMode.automatic, .automatic, .fullReconciliation] {
+        let summary = await ScanProbe.$context.withValue(context) {
+            await coordinator.run(mode: .manual(requestID: UUID(), requestedMode: mode))
+        }
+        #expect(summary.terminalState == .succeeded)
+    }
+    if enabled {
+        let events = sink.events
+        #expect(
+            events.filter { $0.name == .policyDecision }.map { $0.fields["selection"] } == [
+                "initialFull", "incremental", "forcedFull",
+            ])
+        #expect(events.filter { $0.name == .commitSucceeded }.count == 3)
+        #expect(events.filter { $0.name == .commitProposed }.count == 3)
+        #expect(Set(events.compactMap(\.attemptID)).count == 3)
+        #expect(Set(events.compactMap(\.requestID)).count == 3)
+        #expect(events.filter { $0.name == .requestFinished }.allSatisfy { $0.fields["terminalState"] == "succeeded" })
+        let state = try await fixture.store.state(for: fixture.volume.id)
+        #expect(
+            events.last { $0.name == .commitSucceeded }?.fields["cursor"]
+                == state?.checkpoint.lastCommittedEventID.map { String($0) })
+    } else {
+        #expect(sink.events.isEmpty)
+    }
+}
+
+private actor ProbeRejectingReader: EventHistoryReading {
+    let normal: CoordinatorEventReader
+    var rejected = false
+    let fastFailure: Bool
+    let fastSession = FastFailureSession()
+    init(volume: MonitoredVolume, fastFailure: Bool = false) {
+        self.fastFailure = fastFailure
+        normal = CoordinatorEventReader(volumeID: volume.id, eventStoreUUID: volume.eventStoreUUID!)
+    }
+    func openSession(volume: MonitoredVolume, checkpoint: EventStreamCheckpoint?) async throws
+        -> any EventHistorySession
+    {
+        if !rejected {
+            rejected = true
+            if fastFailure { return fastSession }
+            _ = EventTrustEvaluator.assessJournal(
+                expectedUUID: checkpoint?.eventStoreUUID,
+                observedUUID: UUID(), previousEventID: checkpoint?.lastEventID, observedEventID: checkpoint?.lastEventID
+            )
+            let fence = EventCursorFence(
+                volumeID: volume.id, eventStoreUUID: UUID(),
+                highestFullyDeliveredEventID: checkpoint?.lastEventID, phase: .historyDone,
+                trust: .fullScanRequired, diagnostic: "synthetic replacement")
+            return CoordinatorEventSession(history: fence, live: fence)
+        }
+        return try await normal.openSession(volume: volume, checkpoint: checkpoint)
+    }
+}
+
+@Test("Probe recovery keeps typed first cause, failed attempt and pre-recovery checkpoint", arguments: [false, true])
+func coordinatorProbeRecovery(fastFailure: Bool) async throws {
+    let fixture = try await CoordinatorFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let notifications = CoordinatorNotificationProbe()
+    let initial = try fixture.makeCoordinator(latestReportDate: nil, notificationProbe: notifications)
+    _ = await initial.run(mode: .manual(requestID: UUID(), requestedMode: .automatic))
+    let before = try #require(try await fixture.store.state(for: fixture.volume.id))
+    let sink = ProbeCollector()
+    let request = UUID()
+    let reader = ProbeRejectingReader(volume: fixture.volume, fastFailure: fastFailure)
+    let recovery = try fixture.makeCoordinator(
+        latestReportDate: nil, notificationProbe: notifications,
+        eventReader: reader)
+    let result = await ScanProbe.$context.withValue(ScanProbeContext(recorder: sink)) {
+        await recovery.run(mode: .manual(requestID: request, requestedMode: .automatic))
+    }
+    #expect(result.terminalState == .succeeded)
+    let events = sink.events
+    if fastFailure { #expect(await reader.fastSession.stopped) }
+    let reason: ScanProbeReasonCode = fastFailure ? .mailboxOverflow : .journalUUIDChanged
+    let rejected = try #require(events.first { $0.reason == reason })
+    let decision = try #require(events.first { $0.name == .recoverySelected })
+    #expect(decision.fields["firstReason"] == reason.rawValue)
+    #expect(decision.attemptID == rejected.attemptID && decision.runID == rejected.runID)
+    let attempts = events.filter { $0.name == .attemptStarted }
+    #expect(attempts.count == 2 && attempts[0].attemptID != attempts[1].attemptID)
+    #expect(events.filter { $0.name == .commitSucceeded }.count == 1)
+    #expect(events.first { $0.name == .attemptFailed }?.attemptID == rejected.attemptID)
+    let recoveryBasis = try #require(
+        events.first { $0.name == .checkpointRead && $0.attemptID == attempts[1].attemptID })
+    #expect(recoveryBasis.fields["cursor"] == before.checkpoint.lastCommittedEventID.map { String($0) })
+    #expect(recoveryBasis.fields["generation"] == before.checkpoint.activeGenerationID.rawValue.uuidString)
+    #expect(events.allSatisfy { $0.requestID == request })
+    let periodic = try fixture.makeCoordinator(
+        latestReportDate: nil, notificationProbe: notifications,
+        policy: ScanPolicy())
+    _ = await ScanProbe.$context.withValue(ScanProbeContext(recorder: sink)) {
+        await periodic.run(mode: .manual(requestID: UUID(), requestedMode: .fullReconciliation))
+    }
+    #expect(sink.events.last { $0.name == .policyDecision }?.fields["selection"] == "forcedFull")
+}
+
+private actor FastFailureSession: EventHistorySession {
+    var stopped = false
+    func replayHistoricalEvents(consume: @escaping @Sendable (EventBatch) async throws -> Void) async throws
+        -> EventCursorFence
+    {
+        ScanProbe.emit(.rejection, reason: .mailboxOverflow)
+        throw EventReplayInvalidated(reasons: ["DailyDisk FSEvents buffer overflowed"])
+    }
+    func flushLiveEvents(consume: @escaping @Sendable (EventBatch) async throws -> Void) async throws
+        -> EventCursorFence
+    {
+        Issue.record("Invalidated history must not flush")
+        throw EventReplayInvalidated(reasons: ["unexpected flush"])
+    }
+    func stop() async { stopped = true }
+}
+
+@Test("Published full survives later incremental and failed full attempts for automatic deduplication")
+func dailyFullSuccessIsNotErased() async throws {
+    let fixture = try await CoordinatorFixture()
+    defer { fixture.remove() }
+    let notifications = CoordinatorNotificationProbe()
+    let coordinator = try fixture.makeCoordinator(latestReportDate: nil, notificationProbe: notifications)
+    let full = await coordinator.run(mode: .manual(requestID: UUID(), requestedMode: .automatic))
+    #expect(full.terminalState == .succeeded)
+    let reader = try SQLiteReportStore(databaseURL: fixture.databaseURL)
+    let published = try #require(try await reader.latestSuccessfulFullReportDate(for: fixture.domain.id))
+    #expect(await coordinator.run(mode: .scheduled).terminalState == .skippedNotDue)
+    let incremental = await coordinator.run(mode: .manual(requestID: UUID(), requestedMode: .automatic))
+    #expect(incremental.terminalState == .succeeded)
+    #expect(try await reader.recentRuns().first?.kind == .incremental)
+    let failed = ScanRun(kind: .full, reason: .manual, status: .running, startedAt: Date())
+    try await fixture.store.begin(run: failed)
+    try await fixture.store.fail(runID: failed.id, errors: [], finishedAt: Date())
+    #expect(try await reader.latestSuccessfulFullReportDate(for: fixture.domain.id) == published)
+    #expect(await coordinator.run(mode: .scheduled).terminalState == .skippedNotDue)
+}
+
+@Test("Recovering an incremental report can continue into a due full with real Control mode transitions")
+func recoveredIncrementalThenDailyFull() async throws {
+    let fixture = try await CoordinatorFixture()
+    defer { fixture.remove() }
+    let notifications = CoordinatorNotificationProbe()
+    let first = try fixture.makeCoordinator(latestReportDate: nil, notificationProbe: notifications)
+    #expect(await first.run(mode: .manual(requestID: UUID(), requestedMode: .automatic)).terminalState == .succeeded)
+    let failing = try fixture.makeCoordinator(
+        latestReportDate: nil, notificationProbe: notifications,
+        reportWriter: FailingCoordinatorReportWriter())
+    #expect(await failing.run(mode: .manual(requestID: UUID(), requestedMode: .automatic)).terminalState == .failed)
+    let control = try RunControlStore(rootURL: fixture.root.appendingPathComponent("Control"))
+    let request = try DailyDiskRunRequest()
+    try await control.beginScheduledRun(request)
+    let priorTracker = try ScanProgressTracker(
+        context: ScanProgressContext(
+            requestID: request.requestID, trigger: .scheduled, startedAt: request.createdAt),
+        reporter: control, cancellationChecker: control, commitBoundary: control, runBindingRecorder: control)
+    try await priorTracker.transition(to: .preparing, mode: .incremental)
+    try await priorTracker.transition(to: .discoveringStorage, mode: nil)
+    try await priorTracker.transition(to: .publishingReport, mode: nil)
+    let saved = try #require(try await control.latestProgress())
+    // The older published full is yesterday for this synthetic due gate.
+    let coordinator = try fixture.makeCoordinator(
+        latestReportDate: Date().addingTimeInterval(-172800),
+        notificationProbe: notifications,
+        progressFactory: { _, _, _, _ in
+            try ScanProgressTracker(
+                resuming: saved, reporter: control, cancellationChecker: control,
+                commitBoundary: control, runBindingRecorder: control)
+        })
+    let result = await coordinator.run(mode: .scheduled, startedAt: request.createdAt, requestID: request.requestID)
+    #expect(result.terminalState == .succeeded)
+    #expect(try await control.latestProgress()?.mode == .scheduledFull)
+    #expect(await control.channelError() == nil)
+    let reader = try SQLiteReportStore(databaseURL: fixture.databaseURL)
+    #expect(try await reader.recentRuns().count == 3)
+    #expect(try await fixture.store.latestUnreportedBasis(storageDomainID: fixture.domain.id) == nil)
 }

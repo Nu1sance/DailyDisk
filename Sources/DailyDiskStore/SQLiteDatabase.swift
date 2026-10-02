@@ -166,12 +166,28 @@ final class ProcessReadLease {
     }
 }
 
+/// Bounded mode checkpoints between transactions. A single atomic transaction
+/// may exceed the limits; pinned readers prevent any further write transaction
+/// once the hard limit is reached. No durability setting is relaxed.
+public enum WALCheckpointPolicy: Sendable {
+    case everyTransaction
+    case bounded(softLimitBytes: Int64 = 32 * 1_024 * 1_024, hardLimitBytes: Int64 = 128 * 1_024 * 1_024)
+}
+
 final class SQLiteDatabase {
+    private let checkpointPolicy: WALCheckpointPolicy
     private var handle: OpaquePointer?
     let url: URL
     let isReadOnly: Bool
 
-    init(url: URL, readOnly: Bool = false, immutable: Bool = false) throws {
+    init(
+        url: URL, readOnly: Bool = false, immutable: Bool = false,
+        checkpointPolicy: WALCheckpointPolicy = .everyTransaction
+    ) throws {
+        if case .bounded(let soft, let hard) = checkpointPolicy, soft <= 0 || hard < soft {
+            throw SQLiteStoreError(code: -2, message: "Invalid WAL limits")
+        }
+        self.checkpointPolicy = checkpointPolicy
         self.url = url
         self.isReadOnly = readOnly
 
@@ -215,6 +231,7 @@ final class SQLiteDatabase {
         if !readOnly {
             _ = try scalarText("PRAGMA journal_mode = WAL")
             try execute("PRAGMA synchronous = FULL")
+            if case .bounded = checkpointPolicy { try execute("PRAGMA wal_autocheckpoint = 0") }
             // Bound the writer cache while avoiding repeated disk reads across
             // the large path/object indexes during staging and cleanup.
             try execute("PRAGMA cache_size = -65536")
@@ -226,6 +243,12 @@ final class SQLiteDatabase {
     }
 
     deinit {
+        // SQLiteStatement holds an unowned database reference. Do not create
+        // a Swift statement while this object is already deinitializing.
+        if !isReadOnly {
+            sqlite3_busy_timeout(handle, 0)
+            _ = sqlite3_wal_checkpoint_v2(handle, nil, SQLITE_CHECKPOINT_TRUNCATE, nil, nil)
+        }
         sqlite3_close_v2(handle)
     }
 
@@ -269,6 +292,11 @@ final class SQLiteDatabase {
     }
 
     func transaction<T>(_ body: () throws -> T) throws -> T {
+        if !isReadOnly, case .bounded(_, let hard) = checkpointPolicy, walBytes >= hard {
+            // Fail BEFORE BEGIN if a reader pins a large WAL. Never report a
+            // successfully committed inventory transaction as rolled back.
+            try checkpointWAL()
+        }
         try execute("BEGIN IMMEDIATE")
         do {
             let value = try body()
@@ -277,17 +305,39 @@ final class SQLiteDatabase {
                 // The transaction is already committed. Checkpoint maintenance
                 // must never be reported as a rollback-capable commit failure;
                 // immutable readers refuse a nonempty WAL instead.
-                try? checkpointWAL()
+                try? checkpointAfterTransaction()
             }
             return value
         } catch {
             try? execute("ROLLBACK")
-            if !isReadOnly { try? checkpointWAL() }
+            if !isReadOnly { try? checkpointAfterTransaction() }
             throw error
         }
     }
 
-    func checkpointWAL() throws {
+    var walBytes: Int64 {
+        var info = stat()
+        guard lstat(url.path + "-wal", &info) == 0 else { return 0 }
+        return Int64(info.st_size)
+    }
+
+    private func checkpointAfterTransaction() throws {
+        switch checkpointPolicy {
+        case .everyTransaction:
+            try checkpointWAL()
+        case .bounded(let soft, _):
+            guard walBytes >= soft else { return }
+            var frames: Int32 = 0
+            var copied: Int32 = 0
+            let result = sqlite3_wal_checkpoint_v2(handle, nil, SQLITE_CHECKPOINT_PASSIVE, &frames, &copied)
+            guard result == SQLITE_OK else { throw makeError(code: result) }
+            if frames == copied { try checkpointWAL(waitForReaders: false) }
+        }
+    }
+
+    func checkpointWAL(waitForReaders: Bool = true) throws {
+        if !waitForReaders { sqlite3_busy_timeout(handle, 0) }
+        defer { if !waitForReaders { sqlite3_busy_timeout(handle, 5_000) } }
         let statement = try prepare("PRAGMA wal_checkpoint(TRUNCATE)")
         guard try statement.step() else {
             throw SQLiteStoreError(code: -2, message: "WAL checkpoint returned no status")

@@ -1,4 +1,5 @@
 import DailyDiskCore
+import Darwin
 import Foundation
 import Testing
 
@@ -329,11 +330,21 @@ func realStartupVolumeDiscovery() async throws {
 @Test("system process runner enforces timeout and cancellation")
 func systemProcessRunnerStopsWork() async throws {
     let runner = SystemProcessRunner()
-    await #expect(throws: ProcessRunnerError.timedOut(executable: "/bin/sleep", seconds: 0.05)) {
+    // A FIFO keeps the child alive until cancellation, independent of scheduler load.
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let fifo = root.appendingPathComponent("wait").path
+    let ready = root.appendingPathComponent("ready").path
+    try #require(mkfifo(fifo, 0o600) == 0)
+    let descriptor = open(fifo, O_RDWR | O_CLOEXEC)
+    try #require(descriptor >= 0)
+    defer { close(descriptor) }
+    await #expect(throws: ProcessRunnerError.timedOut(executable: "/bin/sh", seconds: 0.05)) {
         _ = try await runner.run(
             ProcessRequest(
-                executableURL: URL(fileURLWithPath: "/bin/sleep"),
-                arguments: ["2"],
+                executableURL: URL(fileURLWithPath: "/bin/sh"),
+                arguments: ["-c", "read -r line < \"$1\"", "fixture", fifo],
                 timeoutSeconds: 0.05
             )
         )
@@ -342,13 +353,18 @@ func systemProcessRunnerStopsWork() async throws {
     let task = Task {
         try await runner.run(
             ProcessRequest(
-                executableURL: URL(fileURLWithPath: "/bin/sleep"),
-                arguments: ["2"],
-                timeoutSeconds: 5
+                executableURL: URL(fileURLWithPath: "/bin/sh"),
+                arguments: ["-c", "printf ready > \"$1\"; read -r line < \"$2\"", "fixture", ready, fifo],
+                timeoutSeconds: 60
             )
         )
     }
-    try await Task.sleep(for: .milliseconds(50))
+    defer { task.cancel() }
+    let deadline = ContinuousClock.now.advanced(by: .seconds(30))
+    while !FileManager.default.fileExists(atPath: ready), ContinuousClock.now < deadline {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    let started = FileManager.default.fileExists(atPath: ready)
     task.cancel()
     do {
         _ = try await task.value
@@ -356,6 +372,7 @@ func systemProcessRunnerStopsWork() async throws {
     } catch is CancellationError {
         // Expected.
     }
+    #expect(started, "Child must signal readiness before cancellation")
 }
 
 @Test("event-store lookup rejects a device ID that cannot fit dev_t")

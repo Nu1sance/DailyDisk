@@ -107,6 +107,7 @@ struct ReportDetailView: View {
         VStack(spacing: 0) {
             detail("空间核算", summary: report.accounting.physicalUsedDelta.map { "物理变化 \(bytes($0))" }) {
                 Grid(alignment: .leading, horizontalSpacing: 28, verticalSpacing: 8) {
+                    metric("库存对比", report.accounting.snapshotComparedDelta)
                     metric("文件事件", report.accounting.eventAttributedDelta)
                     metric("全量校正", report.accounting.reconciliationCorrection)
                     metric("校正后索引", report.accounting.reconciledIndexedDelta)
