@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="t d">
+  <title id="t">DailyDisk 宣传片</title>
+  <desc id="d">DailyDisk 宣传片封面：石墨色背景，靛蓝色的十四日磁盘增长柱状图与播放按钮。</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#14161b"/>
+      <stop offset="1" stop-color="#262a33"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.72" cy="0.42" r="0.55">
+      <stop offset="0" stop-color="#7b8cff" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#7b8cff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="bar" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#7b8cff"/>
+      <stop offset="1" stop-color="#3b55d0"/>
+    </linearGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" fill="none" stroke="#ffffff" stroke-opacity="0.035"/>
+    </pattern>
+  </defs>
+
+  <rect width="1280" height="640" rx="28" fill="url(#bg)"/>
+  <rect width="1280" height="640" rx="28" fill="url(#grid)"/>
+  <rect width="1280" height="640" rx="28" fill="url(#glow)"/>
+
+  <!-- 文案 -->
+  <g font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'PingFang SC', 'Helvetica Neue', sans-serif">
+    <text x="88" y="150" fill="#8d93a3" font-size="20" letter-spacing="6">FILM · 宣传片</text>
+    <text x="84" y="250" fill="#f4f5f8" font-size="92" font-weight="700" letter-spacing="-2">DailyDisk</text>
+    <text x="88" y="318" fill="#c9cdd8" font-size="34" font-weight="500">磁盘每天长了多少，</text>
+    <text x="88" y="366" fill="#c9cdd8" font-size="34" font-weight="500">都记在<tspan fill="#7b8cff" font-weight="700">哪儿</tspan>。</text>
+    <text x="88" y="430" fill="#8d93a3" font-size="20">Where did my disk space go today?</text>
+
+    <g transform="translate(88 488)">
+      <rect width="196" height="48" rx="24" fill="#7b8cff"/>
+      <path d="M30 14 L48 24 L30 34 Z" fill="#14161b"/>
+      <text x="62" y="31" fill="#14161b" font-size="19" font-weight="600">观看宣传片</text>
+    </g>
+    <text x="304" y="519" fill="#8d93a3" font-size="17">即将上线 · Coming soon</text>
+  </g>
+
+  <!-- 十四日增长柱状图，最后一根高亮，与概览页趋势图一致 -->
+  <g transform="translate(700 150)">
+    <rect x="-36" y="-36" width="512" height="388" rx="20" fill="#ffffff" fill-opacity="0.04" stroke="#ffffff" stroke-opacity="0.08"/>
+    <text x="0" y="0" fill="#8d93a3" font-size="16" font-family="-apple-system, 'PingFang SC', sans-serif">近 14 次检查 · 物理增长</text>
+    <line x1="0" y1="232" x2="440" y2="232" stroke="#ffffff" stroke-opacity="0.12"/>
+    <g fill="#5d6170">
+      <rect x="0"   y="184" width="22" height="48" rx="4"/>
+      <rect x="31"  y="150" width="22" height="82" rx="4"/>
+      <rect x="62"  y="200" width="22" height="32" rx="4"/>
+      <rect x="93"  y="232" width="22" height="34" rx="4" fill="#4a4e5a"/>
+      <rect x="124" y="120" width="22" height="112" rx="4"/>
+      <rect x="155" y="170" width="22" height="62" rx="4"/>
+      <rect x="186" y="210" width="22" height="22" rx="4"/>
+      <rect x="217" y="140" width="22" height="92" rx="4"/>
+      <rect x="248" y="232" width="22" height="52" rx="4" fill="#4a4e5a"/>
+      <rect x="279" y="176" width="22" height="56" rx="4"/>
+      <rect x="310" y="96"  width="22" height="136" rx="4"/>
+      <rect x="341" y="160" width="22" height="72" rx="4"/>
+      <rect x="372" y="196" width="22" height="36" rx="4"/>
+    </g>
+    <rect x="403" y="56" width="22" height="176" rx="4" fill="url(#bar)"/>
+    <circle cx="414" cy="40" r="5" fill="#7b8cff"/>
+  </g>
+
+  <!-- 播放按钮 -->
+  <g transform="translate(920 300)">
+    <circle r="62" fill="#14161b" fill-opacity="0.72" stroke="#ffffff" stroke-opacity="0.85" stroke-width="3"/>
+    <path d="M-18 -28 L32 0 L-18 28 Z" fill="#ffffff"/>
+  </g>
+</svg>
