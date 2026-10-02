@@ -3,9 +3,11 @@ import DailyDiskCore
 import Foundation
 import SwiftUI
 
-/// Graphite palette: neutral surfaces with a single indigo accent.
+/// Graphite palette: neutral surfaces, an indigo accent and lemon-yellow chart hover feedback.
 enum Theme {
     static let accent = dynamic(light: (0.231, 0.333, 0.816), dark: (0.482, 0.549, 1.0))
+    // Soft lemon yellow pairs with indigo while keeping pointer feedback light.
+    static let chartHover = dynamic(light: (0.969, 0.851, 0.416), dark: (0.980, 0.890, 0.545))
     static let unattributed = dynamic(light: (0.659, 0.706, 0.933), dark: (0.333, 0.388, 0.667))
     static let overhead = dynamic(light: (0.788, 0.800, 0.839), dark: (0.365, 0.376, 0.408))
     static let release = dynamic(light: (0.620, 0.647, 0.706), dark: (0.478, 0.502, 0.553))

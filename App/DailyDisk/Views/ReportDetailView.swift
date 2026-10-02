@@ -64,10 +64,13 @@ struct ReportDetailView: View {
                     }
                 } label: {
                     Label(
-                        controller.discloseReportPaths ? "隐藏路径" : "显示路径",
-                        systemImage: controller.discloseReportPaths ? "eye.slash" : "eye"
+                        controller.discloseReportPaths ? "路径已显示" : "路径已隐藏",
+                        systemImage: controller.discloseReportPaths ? "eye" : "eye.slash"
                     )
                 }
+                .labelStyle(.titleAndIcon)
+                .accessibilityValue(controller.discloseReportPaths ? "路径已显示" : "路径已隐藏")
+                .accessibilityHint(controller.discloseReportPaths ? "点击隐藏详细路径" : "点击确认在本次会话中显示详细路径")
                 .help(controller.discloseReportPaths ? "隐藏详细路径" : "在本次会话中显示详细路径")
                 Button {
                     confirmExport = true

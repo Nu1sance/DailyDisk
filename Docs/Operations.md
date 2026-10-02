@@ -224,3 +224,11 @@ Schema 7 preserves schema-6 inventory and historical reports. The old schema-6 r
 
 
 W6 source adds the cancellable **正在核对已删除的文件** phase after traversal. Its exact seen bitmap is memory-only, so a stopped run restarts comparison after normal abandoned-overlay cleanup; it never resumes deletion inference from incomplete coverage. Successful daily checks normally retain one current inventory plus 24-hour changed old values. Initial/legacy recovery generations may still coexist temporarily. Rebuild GUI/helper/CLI together before installing. See Testing.md for regression gates.
+
+## Inspecting chart values and path visibility
+
+Hover over a scan column in the overview trend to see its report timestamp and signed physical change. A compact two-line overlay follows the pointer, stays within the chart bounds, and may overlap bars without reserving extra space, and its highlight fades briefly unless Reduce Motion is enabled. VoiceOver values remain available on each bar.
+
+The history toolbar shows current path visibility with text and an icon: “路径已隐藏” with eye.slash, or “路径已显示” with eye. Clicking the hidden state still requires confirmation before disclosing paths for the current session; hiding paths is immediate.
+
+Trend bars use blue for increases and gray for decreases; pointer selection changes either sign to a soft lemon yellow adapted for light and dark appearance. Moving away restores the original color.
