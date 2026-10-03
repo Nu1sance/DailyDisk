@@ -3932,7 +3932,7 @@ extension SQLiteInventoryStore {
         let descriptor = try resolve(target: .expectedActive(volumeID: volumeID), runID: runID)
         var after: Int64 = 0
         // Prefix comparisons use raw bytes, including the slash boundary (cache != cache-neighbor).
-        let roots = opaqueRoots.sorted { $0.bytes.lexicographicallyPrecedes($1.bytes) }
+        let roots = OpaquePathIndex(opaqueRoots)
         while true {
             try await observer.checkpoint()
             try requireRunningRun(runID)
@@ -3947,9 +3947,7 @@ extension SQLiteInventoryStore {
                 count += 1
                 after = page.columnInt64(0)
                 guard !comparison.seen.contains(after), let path = page.columnData(1) else { continue }
-                if roots.contains(where: {
-                    $0.bytes.isEmpty || path == $0.bytes || path.starts(with: $0.bytes + Data([47]))
-                }) {
+                if roots.contains(path) {
                     continue
                 }
                 removed.append(try RelativePath(validating: path))

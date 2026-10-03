@@ -98,7 +98,11 @@ func fullReuseAliasesAndOpaque(batchSize: Int) async throws {
     let baseline = try await establishBaseline(in: f, records: [a, b, opaque, adjacent])
     let temporary = try f.record(path: "a", inode: 1, logicalBytes: 200, allocatedBytes: 256, linkCount: 2)
     let commit = try await fullReuseCommit(
-        f, baseline: baseline, records: [temporary, b], opaque: [RelativePath(validating: "opaque")],
+        f, baseline: baseline, records: [temporary, b],
+        opaque: [
+            RelativePath(validating: "opaque"), RelativePath(validating: "opaque-hidden"),
+            RelativePath(validating: "opaque/hidden/deeper"), RelativePath(validating: "opaque"),
+        ],
         batchSize: batchSize)
     #expect(commit.changes.count == 1)
     #expect(commit.changes.first?.pathBefore == adjacent.path.relativePath)

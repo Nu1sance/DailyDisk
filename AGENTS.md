@@ -540,3 +540,5 @@ Keep current architecture, operational instructions and reproducible synthetic t
 - Observe natural cross-day history expiry and cleanup; synthetic timing is not a device-wear guarantee.
 - Preserve high-churn, opaque-subtree, hard-link, interruption and disk-full recovery coverage when optimizing writes.
 - Keep fresh-Mac/Intel and signed permission/notification acceptance separate from automated test results.
+
+W6 deletion detection uses an in-memory opaque path index: exact raw-byte roots plus merged descendant intervals, queried by binary search. Preserve slash boundaries and non-UTF-8 bytes; a neighboring name may sort between a root and its descendants, so a predecessor search over root names alone is incorrect. This index changes no persistence or opaque-preservation semantics.
