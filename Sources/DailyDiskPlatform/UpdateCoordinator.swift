@@ -1,3 +1,4 @@
+import DailyDiskCore
 import DailyDiskStore
 import Foundation
 
@@ -17,13 +18,19 @@ public actor UpdateCoordinator {
     private let manager: any UpdateTaskManaging
     private let installationDirectory: URL
     private let writerIsActive: @Sendable () -> Bool
+    private let currentBuild: String
+    private let checkSessions: @Sendable () throws -> Void
     private var operating = false
 
     public init(
         control: RunControlStore, manager: any UpdateTaskManaging,
         installationDirectory: URL = Bundle.main.bundleURL.deletingLastPathComponent(),
+        currentBuild: String = DailyDiskProduct.installedBuildNumber,
+        checkSessions: @escaping @Sendable () throws -> Void = { try UpdateSessionGuard.requireSingleUser() },
         writerIsActive: @escaping @Sendable () -> Bool = { SQLiteReportStore.writerIsActive() }
     ) {
+        self.currentBuild = currentBuild
+        self.checkSessions = checkSessions
         self.control = control
         self.manager = manager
         self.installationDirectory = installationDirectory
@@ -34,7 +41,8 @@ public actor UpdateCoordinator {
         guard !operating else { throw UpdatePreparationError.busy }
         operating = true
         defer { operating = false }
-        let installation = try AppInstallationLease(directory: installationDirectory)
+        try checkSessions()
+        let installation = try await control.acquireInstallationLease(installationDirectory: installationDirectory)
         defer { withExtendedLifetime(installation) {} }
         guard !writerIsActive(), try await !manager.runtimeStatus().isRunning else {
             throw UpdatePreparationError.busy
@@ -53,16 +61,57 @@ public actor UpdateCoordinator {
         try await control.setUpdatePhase(id: state.id, phase: .ready)
     }
 
-    /// Explicit user action in this release. Sparkle will later call this only
-    /// after its installation ownership has ended. The shell installer shares
-    /// the directory lock, so restoration cannot race package replacement.
+    public func hasPendingSparkleInstallation() async throws -> Bool {
+        try await control.updatePreparation()?.phase == .sparkleInstalling
+    }
+
+    public func prepareSparkleInstallation(targetBuild: String) async throws -> UUID {
+        try checkSessions()
+        guard let source = Int(currentBuild), let target = Int(targetBuild),
+            source > 0, target > source, target <= 999_999_999, String(target) == targetBuild
+        else { throw UpdatePreparationError.invalidState }
+        if let state = try await control.updatePreparation(), state.phase == .sparkleInstalling {
+            guard state.sourceBuild == currentBuild, state.targetBuild == targetBuild else {
+                throw UpdatePreparationError.invalidState
+            }
+            return state.id
+        }
+        if try await control.updatePreparation() == nil { try await prepare() }
+        guard !operating else { throw UpdatePreparationError.busy }
+        operating = true
+        defer { operating = false }
+        try checkSessions()
+        let installation = try await control.acquireInstallationLease(installationDirectory: installationDirectory)
+        defer { withExtendedLifetime(installation) {} }
+        guard let state = try await control.updatePreparation(), state.phase == .ready,
+            await manager.status() == .notRegistered, try await !manager.runtimeStatus().isRunning,
+            !writerIsActive()
+        else { throw UpdatePreparationError.busy }
+        try await control.armSparkleInstallation(id: state.id, sourceBuild: currentBuild, targetBuild: targetBuild)
+        return state.id
+    }
+
+    public func cancelSparkleDownload(id: UUID) async throws {
+        guard !operating else { throw UpdatePreparationError.busy }
+        try await control.cancelSparkleDownload(id: id)
+        try await restore()
+    }
+
+    /// Sparkle restoration requires the expected new build. The shell installer shares
+    /// the private installation lock, so restoration cannot race package replacement.
     public func restore() async throws {
         guard !operating else { throw UpdatePreparationError.busy }
         operating = true
         defer { operating = false }
-        let installation = try AppInstallationLease(directory: installationDirectory)
+        try checkSessions()
+        let installation = try await control.acquireInstallationLease(installationDirectory: installationDirectory)
         defer { withExtendedLifetime(installation) {} }
         guard let state = try await control.updatePreparation() else { return }
+        if state.phase == .sparkleInstalling {
+            guard state.targetBuild == currentBuild, state.sourceBuild != currentBuild else {
+                throw UpdatePreparationError.installationInProgress
+            }
+        }
         guard !writerIsActive(), try await !manager.runtimeStatus().isRunning else {
             throw UpdatePreparationError.busy
         }

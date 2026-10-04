@@ -64,7 +64,7 @@ These checks require a persistent local signing identity and cannot run safely o
 
 1. Build twice with the same `CODE_SIGN_IDENTITY` and bundle identifier.
 2. Compare `codesign -d -r-` designated requirements for both app builds and both `DailyDiskAgent` helpers.
-3. Install to `~/Applications/DailyDisk.app` using `Scripts/build-app.sh --install`.
+3. Install to `/Applications/DailyDisk.app` using `Scripts/build-app.sh --install`.
 4. Grant Full Disk Access to the installed app and enable notifications interactively.
 5. Rebuild/install with the same identity; verify protected-directory probes remain available.
 6. Confirm an intentionally different identity does not inherit the grant.
@@ -190,4 +190,19 @@ Run `Scripts/test-install-app.sh` for synthetic fresh-install, replacement, busy
 
 ## Update preparation and versions
 
-Run `Scripts/test-version-config.sh` and `Scripts/test-install-app.sh` alongside the standard suite. Update tests use synthetic Control roots and task managers: helper admission races, queued-request preservation, restart, partial unregister, failed restore, disabled preferences, approval and installer-lock exclusion. Malformed fields, linked files and file permissions must remain fail-closed. Metadata checks compare CLI with the shared resource; packaged CLI build-number must match Info.plist even when BUILD_NUMBER overrides the development default. These tests do not establish Sparkle installation, notarization, Gatekeeper or real SMAppService upgrade acceptance.
+Run `Scripts/test-version-config.sh`, `Scripts/test-build-options.sh` and `Scripts/test-install-app.sh` alongside the standard suite. Update tests use synthetic Control roots and task managers: helper admission races, queued-request preservation, restart, partial unregister, failed restore, disabled preferences, approval and installer-lock exclusion. Malformed fields, linked files and file permissions must remain fail-closed. Metadata checks compare CLI with the shared resource; packaged CLI build-number must match Info.plist even when BUILD_NUMBER overrides the development default. These tests do not establish Sparkle installation, notarization, Gatekeeper or real SMAppService upgrade acceptance.
+
+
+## Sparkle update gates
+
+Run `Scripts/test-update-config.sh` for disabled/default configuration and rejection of missing, insecure or malformed feed/key inputs. Platform update tests exercise source/target build admission, persistent scan blocking, old/unknown-build refusal, cancellation before extraction and enabled/disabled task restoration. App tests verify absent configuration never creates an updater. Packaging must embed Sparkle.framework, preserve its symlinks, verify all nested signatures with `codesign --verify --deep --strict`, and include `@executable_path/../Frameworks` in the GUI's runpaths. Helper and CLI must not link Sparkle.
+
+These synthetic checks do not replace the signed two-version Sparkle acceptance matrix in Installation.md. Until a feed and public key are configured, no live update or notarized distribution acceptance is claimed.
+
+### Settings sheet / update termination regression
+
+App tests cover deferring the check until settings dismissal, exactly-once continuation, restoring settings after an acknowledged no-update cycle, leaving settings closed for a menu-origin check, and waiting for settings reopened during download before final installation. Network errors/cancellation must not carry stale restore intent into the next check.
+
+For signed release acceptance, test from both Settings and the application menu, with and without settings reopened during download. Confirm Install and Relaunch exits without manual intervention and retains permissions and the prior task preference. A target-only fix cannot correct the running old updater: install the fixed source build first, then update it to a higher immutable build. Separately test /Applications and ~/Applications and the non-writable-parent failure case; do not equate synthetic tests with these acceptance results.
+
+Private-installation tests cover a read-only app directory, lease exclusion, symlink substitution, conservative other-user rejection, and native flock ownership transferred to the shell via exec. Shell fixtures use an isolated DAILYDISK_INSTALL_CONTROL_ROOT and never touch production Control state. Real /Applications authorization and cancellation are separate acceptance gates; the session guard is a conservative single-user policy, not a guarantee against a new login during replacement.

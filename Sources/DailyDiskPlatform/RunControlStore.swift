@@ -77,12 +77,21 @@ public actor RunControlStore: ScanProgressReporting, ScanCancellationChecking, S
         close(lockFileDescriptor)
     }
 
-    private static let updateKeys: Set<String> = ["version", "id", "restoreDailyTask", "phase"]
+    private static let updateKeys: Set<String> = [
+        "version", "id", "restoreDailyTask", "phase", "sourceBuild", "targetBuild",
+    ]
 
     private func readUpdate() throws -> UpdatePreparation? {
         let state = try readIfPresent(UpdatePreparation.self, from: .update, allowedKeys: Self.updateKeys)
         guard state == nil || state?.version == 1 else { throw UpdatePreparationError.invalidState }
         return state
+    }
+
+    func acquireInstallationLease(installationDirectory: URL) throws -> AppInstallationLease {
+        try withLock {
+            try validateRoot()
+            return try AppInstallationLease(controlDirectory: rootURL, installationDirectory: installationDirectory)
+        }
     }
 
     public func updatePreparation() throws -> UpdatePreparation? {
@@ -117,6 +126,35 @@ public actor RunControlStore: ScanProgressReporting, ScanCancellationChecking, S
             let state = UpdatePreparation(restoreDailyTask: restoreDailyTask)
             try write(state, to: .update, allowedKeys: Self.updateKeys)
             return state
+        }
+    }
+
+    public func armSparkleInstallation(id: UUID, sourceBuild: String, targetBuild: String) throws {
+        try withLock {
+            try validateRoot()
+            guard var state = try readUpdate(), state.id == id, state.phase == .ready,
+                let source = Int(sourceBuild), let target = Int(targetBuild),
+                source > 0, target > source, target <= 999_999_999,
+                String(source) == sourceBuild, String(target) == targetBuild
+            else { throw UpdatePreparationError.invalidState }
+            state.sourceBuild = sourceBuild
+            state.targetBuild = targetBuild
+            state.phase = .sparkleInstalling
+            try write(state, to: .update, allowedKeys: Self.updateKeys)
+        }
+    }
+
+    /// Only the in-process updater may call this before extraction begins.
+    public func cancelSparkleDownload(id: UUID) throws {
+        try withLock {
+            try validateRoot()
+            guard var state = try readUpdate(), state.id == id, state.phase == .sparkleInstalling else {
+                throw UpdatePreparationError.invalidState
+            }
+            state.phase = .ready
+            state.sourceBuild = nil
+            state.targetBuild = nil
+            try write(state, to: .update, allowedKeys: Self.updateKeys)
         }
     }
 

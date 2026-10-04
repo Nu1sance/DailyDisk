@@ -1,6 +1,15 @@
 {
-  "originHash" : "a364a7ece8b26ce42a0144578518936cd173c4ed67176c4ca5f91e0b8ac668fd",
+  "originHash" : "951a6f903d363b5e088154fc2b5b82f9c4ba2c60fb476aeeda59fdbc6214ea90",
   "pins" : [
+    {
+      "identity" : "sparkle",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/sparkle-project/Sparkle",
+      "state" : {
+        "revision" : "eef1a539a373c1f1a320624b1130fc5de7b2e100",
+        "version" : "2.10.0"
+      }
+    },
     {
       "identity" : "swift-syntax",
       "kind" : "remoteSourceControl",
@@ -15,7 +24,6 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/swiftlang/swift-testing.git",
       "state" : {
-        "branch" : "swift-6.0-RELEASE",
         "revision" : "9aa8076dff01b66bcff9335cde02380d59acacc0"
       }
     }

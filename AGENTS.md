@@ -190,7 +190,7 @@ Hard links are keyed by volume/device/inode and receive one canonical attributio
 
 For another user's checkout, follow `Docs/Installation.md`. A stock Mac may require `xcode-select --install`; check Swift 6+ and a matching macOS 15+ SDK. SwiftPM downloads the dependencies pinned in `Package.resolved`. No Homebrew/Python/Node/database-server dependency is required. Full Xcode is optional for a compatible Command Line Tools build. Persistent signing identities are per-user and are not supplied by the repo; do not imply that permissions or the author's certificate transfer via GitHub.
 
-Current packaging builds the host architecture. Intel/fresh-Mac installation and history-page visual acceptance require separate acceptance. CI configuration is not evidence of all-machine compatibility. There is no notarization, release installer, universal build, or automatic-update pipeline.
+Current packaging builds the host architecture. Intel/fresh-Mac installation and history-page visual acceptance require separate acceptance. CI configuration is not evidence of all-machine compatibility. Sparkle 2 is embedded for explicitly configured, user-initiated updates. Public feed/key, signed end-to-end acceptance, notarization, release publication and Homebrew distribution are separate release gates; current packaging is not a universal build.
 
 Basic verification:
 
@@ -234,20 +234,20 @@ For a local trial without a persistent certificate:
 
 ```bash
 ALLOW_ADHOC_SIGNING=1 Scripts/build-app.sh --install
-open "$HOME/Applications/DailyDisk.app"
+open "/Applications/DailyDisk.app"
 ```
 
 This installs to:
 
 ```text
-~/Applications/DailyDisk.app
+/Applications/DailyDisk.app
 ```
 
 Then:
 
 1. Open **设置 → 磁盘权限**.
 2. Open System Settings → Privacy & Security → Full Disk Access.
-3. Add the actual installed bundle, normally `~/Applications/DailyDisk.app`.
+3. Add the actual installed bundle, normally `/Applications/DailyDisk.app`.
 4. Quit and reopen DailyDisk after granting access.
 5. Open **设置** and request notification permission.
 6. Select **安装每日任务**.
@@ -257,7 +257,7 @@ An ad-hoc build is appropriate for a one-time trial only. Rebuilding may require
 
 ## 9. Recommended persistent installation
 
-The script uses an existing valid Code Signing certificate/private key; it does not create one. Apple-issued and valid local self-signed identities are distinct from the explicit ad-hoc trial. See `Docs/Installation.md` for setup and `CODE_SIGN_TIMESTAMP=none` for a local identity. Never distribute a contributor's private signing key.
+The script uses an existing valid Code Signing certificate/private key; it does not create one. Persistent builds require an Apple-issued identity with a Team ID to load the embedded Sparkle framework; local self-signed identities are not supported by this packaging path. See `Docs/Installation.md` for setup and `CODE_SIGN_TIMESTAMP=none` for a local identity. Never distribute a contributor's private signing key.
 
 List available signing identities:
 
@@ -271,7 +271,7 @@ Build and install with the same identity on every update:
 CODE_SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" \
   Scripts/build-app.sh --install
 
-open "$HOME/Applications/DailyDisk.app"
+open "/Applications/DailyDisk.app"
 ```
 
 A stable custom bundle ID may be selected before first authorization:
@@ -305,7 +305,7 @@ Raw `launchctl`, Unified Logging, and local JSONL logs remain developer/expert d
 Installed CLI:
 
 ```bash
-CLI="$HOME/Applications/DailyDisk.app/Contents/Helpers/dailydiskctl"
+CLI="/Applications/DailyDisk.app/Contents/Helpers/dailydiskctl"
 ```
 
 Useful commands:
@@ -391,7 +391,7 @@ Operational logs and notifications do not expose full paths. Scheduled JSON/Mark
 1. In DailyDisk → **设置**, select **移除每日任务** (including pending-approval registrations).
 2. If history should also be removed, use **设置 → 重置历史与基线** while the app is still installed; this performs lease-protected fixed-root cleanup.
 3. Quit the app.
-4. Remove `~/Applications/DailyDisk.app`.
+4. Remove the installed app (normally `/Applications/DailyDisk.app`; older/user installs may be in `~/Applications`).
 5. Remove stale DailyDisk entries from Full Disk Access and Notifications in System Settings.
 
 Deleting history removes the baseline and therefore the ability to explain changes relative to the previous run.
@@ -547,4 +547,22 @@ Before updating an existing installation, finish scans, remove the daily task in
 
 Product.json in DailyDiskCore/Resources is the shared version, source build number and minimum OS source. Packaging replaces Info.plist placeholders; embedded CLI build-number reads the enclosing app's build number. RELEASE_BUILD=1 requires explicit BUILD_NUMBER greater than explicit PREVIOUS_BUILD_NUMBER (0 for first release); this local validation does not yet verify remote release history or perform notarization.
 
-Settings offers explicit Prepare Update / Resume actions, not an automatic updater. Preparation refuses active helpers/writers or queued/active requests, durably saves the original enabled state, blocks new requests and unregisters the task. Helpers hold a shared update-work lease for their entire invocation; marker publication requires exclusive admission under the Control lock. Update state is fixed-schema, private and atomic. Never expire it on a timer. Restart presents explicit recovery; only restore a task that was previously enabled, and surface required system approval. Restoration and preparation share the shell installer's directory lock. A stale lock requires inspection, not automatic removal. Upgrade GUI/helper together; older binaries do not enforce this gate.
+Settings offers Check for Updates plus explicit Prepare Update / Resume actions for source installation. Preparation refuses active helpers/writers or queued/active requests, durably saves the original enabled state, blocks new requests and unregisters the task. Helpers hold a shared update-work lease for their entire invocation; marker publication requires exclusive admission under the Control lock. Update state is fixed-schema, private and atomic. Never expire it on a timer. Restart presents explicit recovery; only restore a task that was previously enabled, and surface required system approval. Restoration and preparation share the source installer's private Control/.installation.lock flock; the source installer also holds the helper's .update-work.lock exclusively. Never unlink these files while held. A legacy application-directory lock still requires inspection, not automatic removal. Upgrade GUI/helper together; older binaries do not enforce this gate.
+
+
+### Sparkle integration
+
+Explicit ad-hoc development bundles use development-only disable-library-validation entitlements; persistent/distribution bundles keep validation enabled and require an Apple signing identity with a Team ID. Only the foreground app links pinned Sparkle 2.10.0. Packaging embeds the framework, preserves symlinks and signs its nested code inside out. No helper/CLI dependency, automatic checks/downloads or system profiling. Builds leave updates disabled unless DAILYDISK_UPDATES_ENABLED=1 supplies an HTTPS SPARKLE_FEED_URL and 32-byte base64 SPARKLE_PUBLIC_ED_KEY. Never embed private keys. Only application archives are accepted, with pre-extraction signature verification enabled.
+
+The standard user driver gates the Install response before download/extraction: pause scans, unregister the daily task, persist source/target builds, then let Sparkle proceed. Download cancellation before extraction restores the previous task setting. Once extraction starts, or after resuming a persisted installation, retain the gate across errors and exit because the external installer can survive the GUI. Only the expected target build may restore scheduling; old-build manual restoration is disabled. Failed post-extraction installs require retrying the pending update or expert recovery after proving the installer is gone; never infer safety from sessionInProgress, an elapsed timer, or app restart. Source installation rejects a pending Sparkle marker. Keep signed two-version update, permission continuity and install-on-quit acceptance as explicit release gates.
+
+
+### Installed identity acceptance
+
+Keep rollback/test copies archived rather than leaving multiple runnable bundles with the production identifier registered in Launch Services. Preserve the canonical install path and designated requirements, not merely Team ID. A separate development build also requires separate task identity and runtime data. When investigating permission loss, distinguish a disabled macOS FDA switch from a heuristic probe failure; validate access across actual app restarts. Use per-app permission recovery only with the user's explicit regrant. Verify helper launch and progress after registration; enabled status alone does not prove a usable job. Never globally reset TCC/BTM or weaken signing enforcement to recover one application.
+
+### Update presentation and installation locations
+
+Before starting a manual Sparkle check, dismiss the settings sheet and continue only after SwiftUI's onDismiss callback and AppKit detachment of the captured sheets (observe didEndSheet; no fixed delay). If the check reports no update, restore settings only if it was open before checking, and only after Sparkle's acknowledgement/cycle completion. Menu checks from a closed settings window must not open one. Both initial/resumed Install and the final Install and Relaunch response pass through settings dismissal; prevent reopening settings once final installation is proceeding. Do not force-terminate the GUI or use a fixed delay as proof of sheet dismissal. Test callbacks for exactly-once behavior and settings reopened during download. Real signed two-version acceptance is still required for the release containing this fix.
+
+Source installation defaults to /Applications. --debug selects Debug compilation and ~/Applications; --user selects ~/Applications without changing compilation. Explicit INSTALL_DIR is supported but must not conflict with --debug/--user. Sparkle updates the running bundle in place. Preparation/restoration use private Control locks rather than requiring write access beside the app. Sparkle handles authorization for protected application replacement; source installation fails with actionable guidance if the destination is not writable and rejects sudo. Duplicate production apps in the two standard directories are rejected. Runtime data/tasks remain per-user. Update preparation and final install check other user launchd domains conservatively; shared-app updates with other logged-in users are unsupported, and users must not start another login session during installation. Permission authorization/cancellation on a standard-user Mac remains a separate real-machine acceptance gate.

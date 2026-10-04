@@ -2,11 +2,13 @@ import Darwin
 import Foundation
 
 public struct UpdatePreparation: Codable, Equatable, Sendable {
-    public enum Phase: String, Codable, Sendable { case preparing, ready, restoring }
+    public enum Phase: String, Codable, Sendable { case preparing, ready, restoring, sparkleInstalling }
     public let version: Int
     public let id: UUID
     public let restoreDailyTask: Bool
     public var phase: Phase
+    public var sourceBuild: String?
+    public var targetBuild: String?
 
     init(restoreDailyTask: Bool) {
         version = 1
@@ -21,6 +23,7 @@ public enum UpdatePreparationError: Error, Equatable {
     case installationInProgress
     case unsupportedRegistration
     case invalidState
+    case otherUserSession
 }
 
 /// Separate open file descriptions make flock effective across actors and processes.
@@ -48,17 +51,35 @@ public final class UpdateWorkLease: @unchecked Sendable {
     deinit { close(descriptor) }
 }
 
-/// Shares the installer's atomic directory lock. A crashed installer leaves the
-/// lock for explicit inspection; never expire it on a timer while replacement may run.
-final class AppInstallationLease {
-    private let url: URL
-    init(directory: URL) throws {
-        let candidate = directory.appendingPathComponent(".DailyDisk-install.lock")
-        guard mkdir(candidate.path, 0o700) == 0 else {
-            if errno == EEXIST { throw UpdatePreparationError.installationInProgress }
-            throw RunControlStoreError.posix(code: errno)
+/// The source installer uses the same private file lock. Never unlink a flock
+/// file: another process may still hold its inode. The durable update marker
+/// separately spans GUI termination and external Sparkle installation.
+final class AppInstallationLease: @unchecked Sendable {
+    private let lease: UpdateWorkLease
+    init(controlDirectory: URL, installationDirectory: URL) throws {
+        var status = stat()
+        let legacy = installationDirectory.appendingPathComponent(".DailyDisk-install.lock")
+        if lstat(legacy.path, &status) == 0 {
+            throw UpdatePreparationError.installationInProgress
         }
-        url = candidate
+        guard errno == ENOENT else { throw RunControlStoreError.posix(code: errno) }
+        do {
+            lease = try UpdateWorkLease(
+                url: controlDirectory.appendingPathComponent(".installation.lock"), exclusive: true)
+        } catch UpdatePreparationError.busy {
+            throw UpdatePreparationError.installationInProgress
+        }
     }
-    deinit { rmdir(url.path) }
+}
+
+extension UpdatePreparationError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .busy: "请等待扫描和报告保存完成后重试。"
+        case .installationInProgress: "已有安装正在进行，或旧安装锁尚待检查。请完成该安装后重试。"
+        case .unsupportedRegistration: "请先在系统设置中完成每日任务批准，再重试更新。"
+        case .invalidState: "更新状态与目标版本不匹配，请完成已开始的更新。"
+        case .otherUserSession: "请先退出其他用户的登录会话，再更新 DailyDisk。"
+        }
+    }
 }

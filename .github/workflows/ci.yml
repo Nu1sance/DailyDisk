@@ -39,7 +39,11 @@ jobs:
           fi
           grep -q 'persistent CODE_SIGN_IDENTITY is required' /tmp/unexpected-build.log
       - name: Test release version inputs
-        run: Scripts/test-version-config.sh
+        run: |
+          Scripts/test-version-config.sh
+          Scripts/test-build-options.sh
+      - name: Test updater configuration
+        run: Scripts/test-update-config.sh
       - name: Test installer safety
         run: Scripts/test-install-app.sh
       - name: Lint LaunchAgent
@@ -49,6 +53,8 @@ jobs:
       - name: Verify app bundle
         run: |
           APP=build/DailyDisk.app
+          test -x "$APP/Contents/Frameworks/Sparkle.framework/Sparkle"
+          test "$(plutil -extract DailyDiskUpdatesEnabled raw "$APP/Contents/Info.plist")" = false
           test -x "$APP/Contents/MacOS/DailyDisk"
           test -x "$APP/Contents/Helpers/DailyDiskAgent"
           test -x "$APP/Contents/Helpers/dailydiskctl"

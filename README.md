@@ -40,7 +40,7 @@ After the installer finishes, check `swift --version` and `xcrun --sdk macosx --
 
 ```bash
 ALLOW_ADHOC_SIGNING=1 Scripts/build-app.sh --install
-open "$HOME/Applications/DailyDisk.app"
+open "/Applications/DailyDisk.app"
 ```
 
 The script builds all three executables, packages resources, signs, verifies, and installs the app. Ad-hoc signing is an explicit trial exception: rebuilding may invalidate privacy grants. For persistent installation, first obtain a valid local Code Signing identity with its private key, then use the same identity on every update:
@@ -49,7 +49,7 @@ The script builds all three executables, packages resources, signs, verifies, an
 security find-identity -v -p codesigning
 CODE_SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" \
   Scripts/build-app.sh --install
-open "$HOME/Applications/DailyDisk.app"
+open "/Applications/DailyDisk.app"
 ```
 
 The identity above is a placeholder, not a certificate supplied by this repository. See **[the complete GitHub source installation guide](Docs/Installation.md)** for cloning, toolchain checks, local self-signed identities, signing options, permissions, updates, and troubleshooting. Full Xcode is optional with compatible Command Line Tools. A paid developer membership is not needed merely to compile or run the ad-hoc trial.
@@ -59,7 +59,7 @@ This is a source distribution with host-architecture builds, not a notarized dow
 ## First-time setup
 
 1. Open the installed app. **概览** shows one primary action appropriate to the current setup state.
-2. If shown, click **允许读取磁盘** and enable the installed DailyDisk bundle in **Privacy & Security → Full Disk Access** (normally `~/Applications/DailyDisk.app`). Quit and reopen the app after granting access.
+2. If shown, click **允许读取磁盘** and enable the installed DailyDisk bundle in **Privacy & Security → Full Disk Access** (normally `/Applications/DailyDisk.app`). Quit and reopen the app after granting access.
 3. Click **启用每日检查**. This enables the background helper and starts a check. If macOS requires approval, the primary action becomes **允许后台检查** and opens Login Items & Extensions.
 4. Once enabled, use **开始首次检查** or **立即检查**. Manual and scheduled runs both show their phase, real counters, elapsed time and the age of the last progress update. No estimated percentage is invented.
 5. You can close the window and reopen it to reconnect, or **取消检查** before saving begins. A stopped helper produces an actionable interruption message instead of an endless spinner; recovery is requested explicitly with **重试检查**.
@@ -117,7 +117,7 @@ Normal scanning, history, reports, health checks, helper controls, data access, 
 The installed copy is at:
 
 ```bash
-"$HOME/Applications/DailyDisk.app/Contents/Helpers/dailydiskctl" status
+"/Applications/DailyDisk.app/Contents/Helpers/dailydiskctl" status
 ```
 
 Paths are omitted by default. Printing reversible JSON or path rankings requires explicit consent:
@@ -149,7 +149,7 @@ Operational logs use typed public values and hash sensitive strings. Notificatio
 1. Open DailyDisk → **设置** → **移除每日任务**.
 2. Quit DailyDisk.
 3. To remove local history safely before deleting the app, use **设置 → 重置历史与基线**. It unregisters the helper, verifies writer quiescence, and deletes only DailyDisk's fixed private data root while preserving the control handshake.
-4. Remove `~/Applications/DailyDisk.app`.
+4. Remove the installed app (normally `/Applications/DailyDisk.app`; older/user installs may be in `~/Applications`).
 5. Remove DailyDisk from Full Disk Access and Notifications in System Settings if entries remain.
 
 ## Important limitations
@@ -203,3 +203,9 @@ Overview and report details list up to five non-overlapping growth entries and u
 旧库存有 24 小时恢复窗口，后续后台运行时清理。自动压缩有空间阈值和七天冷却期，不会每天无条件执行。全量扫描仍需要临时空间；详情见 [运行维护](Docs/Operations.md#reclaiming-dailydisk-data-space)。升级后请重新打开 GUI，使其与 helper 使用同一版本。
 
 Before updating an existing installation, finish scans, remove the daily task in Settings, quit the GUI and close CLI inspections. Rebuild with the original signing identity, then reopen the app and enable the daily task again. The installer validates signatures, refuses active/registered workers and restores the previous app on replacement failure. See Docs/Installation.md for interruption recovery and database rollback limits.
+
+### Installation locations and updates
+
+Source installation now defaults to /Applications. Use --debug --install for a Debug build in ~/Applications, or --user --install for a Release build there. Existing installations update in place; do not keep production copies in both folders. Explicit INSTALL_DIR remains supported, but conflicts with --debug/--user are rejected. Never run the build script with sudo.
+
+Configured builds offer manual Sparkle updates. Update preparation uses private Control files; Sparkle may request administrator authorization when replacing a protected app. Log out other users before updating a shared installation. Source builds leave updates disabled unless feed and public key are explicitly supplied. See Docs/Installation.md for signing, recovery and acceptance limitations.

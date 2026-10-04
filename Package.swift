@@ -16,6 +16,7 @@ let package = Package(
         .executable(name: "dailydiskctl", targets: ["dailydiskctl"]),
     ],
     dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0"),
         .package(
             url: "https://github.com/swiftlang/swift-testing.git",
             revision: "9aa8076dff01b66bcff9335cde02380d59acacc0"
@@ -42,9 +43,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "DailyDiskApp",
-            dependencies: ["DailyDiskCore", "DailyDiskStore", "DailyDiskPlatform"],
+            dependencies: ["DailyDiskCore", "DailyDiskStore", "DailyDiskPlatform", .product(name: "Sparkle", package: "Sparkle")],
             path: "App/DailyDisk",
-            exclude: ["LaunchAgents"]
+            exclude: ["LaunchAgents"],
+            linkerSettings: [.unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])]
         ),
         .executableTarget(
             name: "DailyDiskAgent",

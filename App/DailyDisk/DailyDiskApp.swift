@@ -21,17 +21,30 @@ enum DailyDiskEntryPoint {
 }
 
 struct DailyDiskApplication: App {
-    @StateObject private var controller = AppController()
+    @StateObject private var controller: AppController
     @State private var section: MainSection? = .overview
-    @State private var showsSettings = false
+    @StateObject private var updatePresentation: UpdatePresentation
+
+    init() {
+        let controller = AppController()
+        _controller = StateObject(wrappedValue: controller)
+        _updatePresentation = StateObject(wrappedValue: controller.softwareUpdater.presentation)
+    }
     @Environment(\.scenePhase) private var scenePhase
+
+    private var settingsBinding: Binding<Bool> {
+        Binding(
+            get: { updatePresentation.showsSettings },
+            set: { if !$0 || !updatePresentation.installing { updatePresentation.showsSettings = $0 } }
+        )
+    }
 
     var body: some Scene {
         WindowGroup("DailyDisk") {
-            MainWindow(controller: controller, section: $section, showsSettings: $showsSettings)
+            MainWindow(controller: controller, section: $section, showsSettings: settingsBinding)
                 .frame(minWidth: 900, minHeight: 600)
                 .tint(Theme.accent)
-                .sheet(isPresented: $showsSettings) {
+                .sheet(isPresented: settingsBinding, onDismiss: updatePresentation.settingsDidDismiss) {
                     PreferencesView(controller: controller)
                 }
                 .task { await controller.refresh() }
@@ -42,8 +55,12 @@ struct DailyDiskApplication: App {
         .defaultSize(width: 1100, height: 740)
         .commands {
             CommandGroup(replacing: .appSettings) {
-                Button("设置…") { showsSettings = true }
+                Button("设置…") { updatePresentation.showsSettings = true }
                     .keyboardShortcut(",")
+                    .disabled(updatePresentation.installing)
+            }
+            CommandGroup(after: .appInfo) {
+                CheckForSoftwareUpdates(updater: controller.softwareUpdater)
             }
             CommandGroup(replacing: .appInfo) {
                 Button("关于 DailyDisk") {
@@ -82,5 +99,12 @@ private struct PreferencesView: View {
             }
         }
         .frame(width: 720, height: 600)
+    }
+}
+
+struct CheckForSoftwareUpdates: View {
+    @ObservedObject var updater: SoftwareUpdater
+    var body: some View {
+        Button("检查更新…") { updater.checkForUpdates() }.disabled(!updater.canCheck)
     }
 }

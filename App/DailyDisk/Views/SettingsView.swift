@@ -10,15 +10,24 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section("软件更新") {
+                SoftwareUpdateSettings(updater: controller.softwareUpdater)
                 LabeledContent("版本", value: "\(DailyDiskProduct.version) (\(DailyDiskProduct.installedBuildNumber))")
                 if controller.updatePreparation != nil {
-                    Text("已进入更新准备，新的扫描已暂停。安装完成或放弃安装后，请恢复运行。")
+                    Text(
+                        controller.updatePreparation?.phase == .sparkleInstalling
+                            ? "正在更新，扫描已暂停；新版本启动后会恢复原有每日任务。若安装中断，请重新检查更新并完成安装。"
+                            : "已进入更新准备，新的扫描已暂停。手动安装完成或放弃安装后，请恢复运行。")
                     Button("恢复运行") { Task { await controller.restoreAfterUpdate() } }
-                        .disabled(controller.isPreparingUpdate)
+                        .disabled(
+                            controller.isPreparingUpdate
+                                || (controller.updatePreparation?.phase == .sparkleInstalling
+                                    && controller.updatePreparation?.targetBuild
+                                        != DailyDiskProduct.installedBuildNumber)
+                        )
                 } else {
                     Button("准备安装更新") { Task { await controller.prepareForUpdate() } }
                         .disabled(controller.isPreparingUpdate)
-                    Text("当前需要手动安装。准备操作会在空闲时暂停每日任务，不会下载或安装软件。")
+                    Text("手动替换应用前，请先准备安装更新；应用内更新会自动完成准备。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -150,6 +159,16 @@ struct SettingsView: View {
         case .provisional: "临时允许"
         case .ephemeral: "临时会话"
         case .unknown: "未知"
+        }
+    }
+}
+
+private struct SoftwareUpdateSettings: View {
+    @ObservedObject var updater: SoftwareUpdater
+    var body: some View {
+        CheckForSoftwareUpdates(updater: updater)
+        if let message = updater.message {
+            Text(message).font(.caption).foregroundStyle(.secondary)
         }
     }
 }

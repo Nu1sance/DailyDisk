@@ -30,6 +30,7 @@ final class AppController: ObservableObject {
     @Published private(set) var updatePreparation: UpdatePreparation?
     @Published private(set) var isPreparingUpdate = false
     private let updateCoordinator: UpdateCoordinator?
+    lazy var softwareUpdater = SoftwareUpdater(coordinator: updateCoordinator)
 
     private let accessProbe: any FullDiskAccessProbing
     private let notificationManager: any NotificationAuthorizationManaging
@@ -419,8 +420,19 @@ final class AppController: ObservableObject {
     func openFullDiskAccessSettings() { FullDiskAccessProbe.openSystemSettings() }
     func openNotificationSettings() { NotificationManager.openSystemSettings() }
 
+    private var attemptedSparkleRestoration = false
+
     private func refreshUpdatePreparation() async {
-        do { updatePreparation = try await controlStore?.updatePreparation() } catch {
+        do {
+            updatePreparation = try await controlStore?.updatePreparation()
+            if !attemptedSparkleRestoration, updatePreparation?.phase == .sparkleInstalling,
+                updatePreparation?.targetBuild == DailyDiskProduct.installedBuildNumber
+            {
+                attemptedSparkleRestoration = true
+                try await updateCoordinator?.restore()
+                updatePreparation = try await controlStore?.updatePreparation()
+            }
+        } catch {
             errorMessage = "无法读取更新准备状态，请检查本地控制文件。"
         }
     }
@@ -446,6 +458,8 @@ final class AppController: ObservableObject {
             actionMessage = "已暂停每日任务。请退出应用后安装更新，重新打开后恢复运行。"
         } catch UpdatePreparationError.busy {
             errorMessage = "请等待扫描及报告保存完成后，再准备安装更新。"
+        } catch let error as UpdatePreparationError {
+            errorMessage = error.errorDescription
         } catch {
             errorMessage = "无法完成更新准备。若任务已暂停，可在设置中恢复运行后重试。"
         }

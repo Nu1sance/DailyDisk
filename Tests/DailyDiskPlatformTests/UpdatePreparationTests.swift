@@ -78,14 +78,14 @@ func updateRestorePreferences(enabled: Bool) async throws {
     let store = try RunControlStore(rootURL: location)
     let manager = UpdateTaskFixture(enabled ? .enabled : .notRegistered)
     let coordinator = UpdateCoordinator(
-        control: store, manager: manager, installationDirectory: root, writerIsActive: { false })
+        control: store, manager: manager, installationDirectory: root, checkSessions: {}, writerIsActive: { false })
     try await coordinator.prepare()
     #expect(try await store.updatePreparation()?.phase == .ready)
     #expect(await manager.status() == .notRegistered)
     let restarted = try RunControlStore(rootURL: location)
     #expect(try await restarted.acquireHelperUpdateLease() == nil)
     let recovery = UpdateCoordinator(
-        control: restarted, manager: manager, installationDirectory: root, writerIsActive: { false })
+        control: restarted, manager: manager, installationDirectory: root, checkSessions: {}, writerIsActive: { false })
     try await recovery.restore()
     try await recovery.restore()
     #expect(await manager.registrations == (enabled ? 1 : 0))
@@ -99,7 +99,7 @@ func updateFailureRecovery() async throws {
     let store = try RunControlStore(rootURL: root.appendingPathComponent("Control"))
     let manager = UpdateTaskFixture()
     let coordinator = UpdateCoordinator(
-        control: store, manager: manager, installationDirectory: root, writerIsActive: { false })
+        control: store, manager: manager, installationDirectory: root, checkSessions: {}, writerIsActive: { false })
     await manager.setFailures(unregister: true)
     await #expect(throws: UpdatePreparationError.busy) { try await coordinator.prepare() }
     #expect(try await store.updatePreparation()?.phase == .preparing)
@@ -182,14 +182,121 @@ func updateBusyAndApproval() async throws {
     let store = try RunControlStore(rootURL: root.appendingPathComponent("Control"))
     let manager = UpdateTaskFixture()
     let busy = UpdateCoordinator(
-        control: store, manager: manager, installationDirectory: root, writerIsActive: { true })
+        control: store, manager: manager, installationDirectory: root, checkSessions: {}, writerIsActive: { true })
     await #expect(throws: UpdatePreparationError.busy) { try await busy.prepare() }
     #expect(await manager.status() == .enabled)
     #expect(try await store.updatePreparation() == nil)
     let pending = UpdateTaskFixture(.requiresApproval)
     let unresolved = UpdateCoordinator(
-        control: store, manager: pending, installationDirectory: root, writerIsActive: { false })
+        control: store, manager: pending, installationDirectory: root, checkSessions: {}, writerIsActive: { false })
     await #expect(throws: UpdatePreparationError.unsupportedRegistration) { try await unresolved.prepare() }
     #expect(await pending.status() == .requiresApproval)
     #expect(try await store.updatePreparation() == nil)
+}
+
+@Test(
+    "Sparkle gates installation across restart and only the target build restores preferences",
+    arguments: [true, false])
+func sparkleInstallationRecovery(enabled: Bool) async throws {
+    let root = try updateRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = try RunControlStore(rootURL: root.appendingPathComponent("Control"))
+    let manager = UpdateTaskFixture(enabled ? .enabled : .notRegistered)
+    func coordinator(_ build: String) -> UpdateCoordinator {
+        UpdateCoordinator(
+            control: store, manager: manager, installationDirectory: root,
+            currentBuild: build, checkSessions: {}, writerIsActive: { false })
+    }
+    await #expect(throws: UpdatePreparationError.invalidState) {
+        _ = try await coordinator("10").prepareSparkleInstallation(targetBuild: "9")
+    }
+    #expect(try await store.updatePreparation() == nil)
+    let id = try await coordinator("10").prepareSparkleInstallation(targetBuild: "11")
+    #expect(try await store.acquireHelperUpdateLease() == nil)
+    #expect(await manager.status() == .notRegistered)
+    await #expect(throws: UpdatePreparationError.installationInProgress) { try await coordinator("10").restore() }
+    await #expect(throws: UpdatePreparationError.installationInProgress) { try await coordinator("12").restore() }
+    #expect(try await coordinator("10").prepareSparkleInstallation(targetBuild: "11") == id)
+    try await coordinator("11").restore()
+    #expect(try await store.updatePreparation() == nil)
+    #expect(await manager.registrations == (enabled ? 1 : 0))
+}
+
+@Test("Cancelled download restores scheduling without installing or advancing inventory")
+func sparkleCancelledDownload() async throws {
+    let root = try updateRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = try RunControlStore(rootURL: root.appendingPathComponent("Control"))
+    let manager = UpdateTaskFixture()
+    let coordinator = UpdateCoordinator(
+        control: store, manager: manager, installationDirectory: root,
+        currentBuild: "10", checkSessions: {}, writerIsActive: { false })
+    let id = try await coordinator.prepareSparkleInstallation(targetBuild: "11")
+    await #expect(throws: UpdatePreparationError.invalidState) {
+        try await coordinator.cancelSparkleDownload(id: UUID())
+    }
+    try await coordinator.cancelSparkleDownload(id: id)
+    #expect(try await store.updatePreparation() == nil)
+    #expect(await manager.status() == .enabled)
+}
+
+@Test("Preparation and recovery work with a read-only application directory")
+func updateReadOnlyApplicationDirectory() async throws {
+    let root = try updateRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let directory = root.appendingPathComponent("Applications")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+    try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: directory.path)
+    defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path) }
+    let control = try RunControlStore(rootURL: root.appendingPathComponent("Control"))
+    let manager = UpdateTaskFixture()
+    let coordinator = UpdateCoordinator(
+        control: control, manager: manager, installationDirectory: directory,
+        checkSessions: {}, writerIsActive: { false })
+    try await coordinator.prepare()
+    try await coordinator.restore()
+    #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path).isEmpty)
+    #expect(await manager.status() == .enabled)
+}
+
+@Test("Private installation lease excludes another coordinator and rejects symlink substitution")
+func privateInstallationExclusion() async throws {
+    let root = try updateRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let location = root.appendingPathComponent("Control")
+    let control = try RunControlStore(rootURL: location)
+    var lease: AppInstallationLease? = try await control.acquireInstallationLease(installationDirectory: root)
+    let coordinator = UpdateCoordinator(
+        control: control, manager: UpdateTaskFixture(), installationDirectory: root,
+        checkSessions: {}, writerIsActive: { false })
+    await #expect(throws: UpdatePreparationError.installationInProgress) { try await coordinator.prepare() }
+    withExtendedLifetime(lease) {}
+    lease = nil
+    try await coordinator.prepare()
+    try await coordinator.restore()
+    let file = location.appendingPathComponent(".installation.lock")
+    try FileManager.default.removeItem(at: file)
+    try FileManager.default.createSymbolicLink(at: file, withDestinationURL: root.appendingPathComponent("victim"))
+    await #expect(throws: (any Error).self) { try await coordinator.prepare() }
+}
+
+@Test("Other login sessions block preparation before changing task state")
+func updateOtherUserSession() async throws {
+    try UpdateSessionGuard.validate("system = {\nuser/0\nuser/501\n}", currentUID: 501)
+    #expect(throws: UpdatePreparationError.otherUserSession) {
+        try UpdateSessionGuard.validate("system = {\nuser/0\nuser/501\nuser/502\n}", currentUID: 501)
+    }
+    #expect(throws: UpdatePreparationError.otherUserSession) {
+        try UpdateSessionGuard.validate("", currentUID: 501)
+    }
+    let root = try updateRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let control = try RunControlStore(rootURL: root.appendingPathComponent("Control"))
+    let manager = UpdateTaskFixture()
+    let coordinator = UpdateCoordinator(
+        control: control, manager: manager, installationDirectory: root,
+        checkSessions: { throw UpdatePreparationError.otherUserSession }, writerIsActive: { false })
+    await #expect(throws: UpdatePreparationError.otherUserSession) { try await coordinator.prepare() }
+    #expect(try await control.updatePreparation() == nil)
+    #expect(await manager.status() == .enabled)
 }

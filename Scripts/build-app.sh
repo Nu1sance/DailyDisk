@@ -15,22 +15,7 @@ RELEASE_BUILD="${RELEASE_BUILD:-0}"
 CODE_SIGN_IDENTITY="${CODE_SIGN_IDENTITY:--}"
 CODE_SIGN_TIMESTAMP="${CODE_SIGN_TIMESTAMP:-secure}"
 ALLOW_ADHOC_SIGNING="${ALLOW_ADHOC_SIGNING:-0}"
-INSTALL_DIR="${INSTALL_DIR:-$HOME/Applications}"
-INSTALL_APP=0
-if [[ "${1:-}" == "--install" ]]; then
-    INSTALL_APP=1
-elif [[ $# -gt 0 ]]; then
-    echo "usage: $0 [--install]" >&2
-    exit 64
-fi
-
-case "$CONFIGURATION" in
-    debug|release) ;;
-    *)
-        echo "error: CONFIGURATION must be 'debug' or 'release'" >&2
-        exit 64
-        ;;
-esac
+source "$ROOT/Scripts/build-options.sh"
 
 if [[ ! "$BUNDLE_IDENTIFIER" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*[A-Za-z0-9]$ ]] \
     || [[ "$BUNDLE_IDENTIFIER" != *.* ]] \
@@ -132,6 +117,9 @@ cp "$BIN_DIR/DailyDiskApp" "$STAGING_APP/Contents/MacOS/DailyDisk"
 cp "$BIN_DIR/DailyDiskAgent" "$STAGING_APP/Contents/Helpers/DailyDiskAgent"
 cp "$BIN_DIR/dailydiskctl" "$STAGING_APP/Contents/Helpers/dailydiskctl"
 cp "$ROOT/Config/DailyDisk-Info.plist" "$STAGING_APP/Contents/Info.plist"
+mkdir -p "$STAGING_APP/Contents/Frameworks"
+ditto "$BIN_DIR/Sparkle.framework" "$STAGING_APP/Contents/Frameworks/Sparkle.framework"
+"$ROOT/Scripts/configure-updates.sh" "$STAGING_APP/Contents/Info.plist"
 cp "$ROOT/Config/PrivacyInfo.xcprivacy" "$STAGING_APP/Contents/Resources/PrivacyInfo.xcprivacy"
 
 ICON_SOURCE="$ROOT/Config/AppIcon.png"
@@ -171,6 +159,13 @@ if [[ "$CODE_SIGN_IDENTITY" != "-" && "$CODE_SIGN_TIMESTAMP" != "none" ]]; then
     TIMESTAMP_ARGUMENT=("--timestamp")
 fi
 
+# Sign nested Sparkle code from the inside out, retaining vendor entitlements.
+SPARKLE="$STAGING_APP/Contents/Frameworks/Sparkle.framework/Versions/B"
+for component in "$SPARKLE"/XPCServices/*.xpc "$SPARKLE/Autoupdate" "$SPARKLE/Updater.app" "$STAGING_APP/Contents/Frameworks/Sparkle.framework"; do
+    codesign --force --sign "$CODE_SIGN_IDENTITY" "${TIMESTAMP_ARGUMENT[@]}" \
+        --options runtime --preserve-metadata=entitlements "$component"
+done
+
 codesign \
     --force \
     --sign "$CODE_SIGN_IDENTITY" \
@@ -185,13 +180,27 @@ codesign \
     --options runtime \
     "$STAGING_APP/Contents/Helpers/dailydiskctl"
 
+APP_ENTITLEMENTS="$ROOT/Config/DailyDisk.entitlements"
+if [[ "$CODE_SIGN_IDENTITY" == "-" ]]; then
+    # Explicit ad-hoc development builds have no Team ID for library validation.
+    # RELEASE_BUILD rejects ad-hoc signing above; distribution retains validation.
+    APP_ENTITLEMENTS="$ROOT/Config/DailyDisk-Development.entitlements"
+fi
 codesign \
     --force \
     --sign "$CODE_SIGN_IDENTITY" \
     "${TIMESTAMP_ARGUMENT[@]}" \
     --options runtime \
-    --entitlements "$ROOT/Config/DailyDisk.entitlements" \
+    --entitlements "$APP_ENTITLEMENTS" \
     "$STAGING_APP"
+
+if [[ "$CODE_SIGN_IDENTITY" != "-" ]]; then
+    TEAM_ID="$(codesign -dv "$STAGING_APP" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+    if [[ -z "$TEAM_ID" || "$TEAM_ID" == not\ set ]]; then
+        echo 'error: Sparkle library validation requires an Apple signing identity with a Team ID' >&2
+        exit 64
+    fi
+fi
 
 plutil -lint \
     "$STAGING_APP/Contents/Info.plist" \

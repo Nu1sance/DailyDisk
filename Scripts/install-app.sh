@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
 # Install only while the GUI and its registered worker are disabled.
 set -euo pipefail
+SCRIPT_ROOT="$(cd "$(dirname "$0")" && pwd)"
+CONTROL_ROOT="${DAILYDISK_INSTALL_CONTROL_ROOT:-$HOME/Library/Application Support/DailyDisk/Control}"
+if [[ "${1:-}" != --locked ]]; then
+    [[ $# == 2 ]] || { echo "usage: $0 SOURCE_APP INSTALL_DIR" >&2; exit 64; }
+    exec swift "$SCRIPT_ROOT/with-installation-lock.swift" "$CONTROL_ROOT" "$0" "$1" "$2"
+fi
+shift
 [[ $# == 2 ]] || { echo 'usage: install-app.sh SOURCE_APP INSTALL_DIR' >&2; exit 64; }
+[[ "$(id -u)" != 0 ]] || { echo 'error: do not run source installation with sudo' >&2; exit 1; }
 SOURCE_APP="$1"
 INSTALL_DIR="$2"
 mkdir -p "$INSTALL_DIR"
@@ -13,7 +21,19 @@ esac
 TARGET="$INSTALL_DIR/DailyDisk.app"
 [[ ! -L "$TARGET" ]] || { echo 'error: installed app must not be a symlink' >&2; exit 1; }
 LOCK="$INSTALL_DIR/.DailyDisk-install.lock"
-mkdir "$LOCK" || { echo 'error: another installation or an interrupted install holds the install lock' >&2; exit 1; }
+[[ ! -e "$LOCK" && ! -L "$LOCK" ]] || {
+    echo 'error: legacy installation lock exists; inspect before retrying' >&2; exit 1;
+}
+[[ -w "$INSTALL_DIR" ]] || {
+    echo 'error: destination is not writable; use an authorized Finder install or --user; do not sudo this script' >&2; exit 1;
+}
+if [[ "$INSTALL_DIR" == /Applications || "$INSTALL_DIR" == "$HOME/Applications" ]]; then
+for alternative in /Applications/DailyDisk.app "$HOME/Applications/DailyDisk.app"; do
+    if [[ "$alternative" != "$TARGET" && ( -e "$alternative" || -L "$alternative" ) ]]; then
+        echo 'error: DailyDisk exists at another installation location; keep one production copy' >&2; exit 1
+    fi
+done
+fi
 WORK=""
 OLD_MOVED=0
 SUCCESS=0
@@ -31,7 +51,6 @@ cleanup() {
     if [[ -n "$WORK" && ( "$OLD_MOVED" == 0 || "$SUCCESS" == 1 ) ]]; then
         rm -rf "$WORK"
     fi
-    rmdir "$LOCK"
     exit "$result"
 }
 trap cleanup EXIT
@@ -39,7 +58,31 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
 require_idle() {
-    local code
+    local code phase sessions
+    sessions="$(launchctl print system)" || { echo 'error: cannot inspect login sessions' >&2; exit 1; }
+    if ! printf '%s\n' "$sessions" | awk -v current="$(id -u)" '
+        NR == 1 && $0 != "system = {" { bad=1 }
+        $1 ~ /^user\// {
+            uid=substr($1, 6)
+            if (uid !~ /^[0-9]+$/) bad=1
+            if (uid == current) found=1
+            if (uid >= 500 && uid != current) bad=1
+        }
+        END { exit (bad || !found) ? 1 : 0 }'; then
+        echo 'error: log out other user sessions before updating the shared app' >&2; exit 1
+    fi
+    local control="$CONTROL_ROOT"
+    local marker="$control/update-preparation.json"
+    if [[ -L "$control" || -L "$marker" ]]; then
+        echo 'error: unsafe update state; inspect before installing' >&2; exit 1
+    fi
+    if [[ -e "$marker" ]]; then
+        phase="$(/usr/bin/plutil -extract phase raw "$marker")" || exit 1
+        case "$phase" in
+            preparing|ready|restoring) ;;
+            *) echo 'error: finish the pending Sparkle update before source installation' >&2; exit 1 ;;
+        esac
+    fi
     for name in DailyDisk DailyDiskAgent dailydiskctl; do
         if pgrep -x "$name" >/dev/null; then
             echo 'error: quit DailyDisk and wait for helper/CLI work to finish before installing' >&2
