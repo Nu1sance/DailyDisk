@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>DailyDisk Testing Updates</title>
+    <link>https://nu1sance.github.io/DailyDisk/testing/appcast.xml</link>
+    <description>DailyDisk testing update feed. No updates published yet.</description>
+    <language>en</language>
+  </channel>
+</rss>
