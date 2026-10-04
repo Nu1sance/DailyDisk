@@ -56,7 +56,7 @@ External system commands are invoked by absolute path without a shell. `SystemPr
 
 ## Daily-full refactor boundaries
 
-The daily-full path starts from a trusted current-journal E0, traverses all metadata, applies E0–E1 changes and compares the final logical inventory with previous committed inventory. It neither replays yesterday’s history nor builds/seals an event-maintained expected inventory. With W6, an existing baseline is reused through a run-scoped active overlay containing scan differences; it is not an event-maintained copy of yesterday’s history. Opaque rows are inherited. Initial/legacy generation builds retain the bounded opaque-copy pager. Final topology/device/journal identity is rechecked before activation. Legacy scheduled reconciliation and incremental-recovery diagnostics retain their old path for compatibility; they are not the default daily policy.
+The daily-full path starts from a trusted current-journal E0, traverses all metadata, applies E0–E1 changes and compares the final logical inventory with previous committed inventory. It neither replays yesterday’s history nor builds/seals an event-maintained expected inventory. With daily inventory reuse, an existing baseline is reused through a run-scoped active overlay containing scan differences; it is not an event-maintained copy of yesterday’s history. Opaque rows are inherited. Initial/legacy generation builds retain the bounded opaque-copy pager. Final topology/device/journal identity is rechecked before activation. Legacy scheduled reconciliation and incremental-recovery diagnostics retain their old path for compatibility; they are not the default daily policy.
 
 ## Full inventory scanning
 
@@ -70,17 +70,17 @@ Traversal uses descriptor-relative POSIX operations:
 - directory entries are copied in bounded chunks before asynchronous batch delivery.
 - symlinks are indexed as links and never traversed.
 
-Logical size comes from `st_size`; allocated size uses checked `st_blocks × 512`. Paths are assembled from raw `d_name` bytes and kept volume-relative. Inventory records stream in bounded batches to either initial staging or W6 batch comparison, providing backpressure rather than retaining file records in the scanner.
+Logical size comes from `st_size`; allocated size uses checked `st_blocks × 512`. Paths are assembled from raw `d_name` bytes and kept volume-relative. Inventory records stream in bounded batches to either initial staging or daily inventory reuse batch comparison, providing backpressure rather than retaining file records in the scanner.
 
 Nested filesystems are skipped even when encountered below a selected root. The sealed System volume remains metrics-only, while `/System/Volumes/Data` is the sole startup writable namespace root.
 
 DailyDisk's own Application Support directory is excluded from ordinary inventory rather than scanned while SQLite is actively changing it. Its database, WAL, SHM, lock, logs, and reports are measured separately as known tool overhead during physical attribution.
 
-Permission-denied paths are subject to independent absolute and fractional completeness limits. On the initial baseline they remain explicitly opaque; on later W6 daily scans the deletion pass excludes their old paths while retaining successful current observations. Legacy generation builds copy only missing staging paths. Opaque data is not reported as deleted. Incremental permission events preserve the previous path state. Provider-unavailable/dataless content is also retained as opaque with coverage diagnostics. Other non-disappearance metadata, directory-read, descriptor, memory, or I/O failures make the scan non-authoritative. `ENOENT`/`ESTALE` races are retained as transient diagnostics for journal replay. Tolerated errors are attached to successful scan commits and stored with the run.
+Permission-denied paths are subject to independent absolute and fractional completeness limits. On the initial baseline they remain explicitly opaque; on subsequent daily full scans the deletion pass excludes their old paths while retaining successful current observations. Legacy generation builds copy only missing staging paths. Opaque data is not reported as deleted. Incremental permission events preserve the previous path state. Provider-unavailable/dataless content is also retained as opaque with coverage diagnostics. Other non-disappearance metadata, directory-read, descriptor, memory, or I/O failures make the scan non-authoritative. `ENOENT`/`ESTALE` races are retained as transient diagnostics for journal replay. Tolerated errors are attached to successful scan commits and stored with the run.
 
 The first full scan is an opening balance and writes no synthetic positive change per existing object. Later ledger validation uses SQLite file-backed temporary tables and ordered canonical-object cursors, so full reconciliation does not materialize multiple complete inventory copies in Swift memory.
 
-## Historical FSEvents sessions
+## FSEvents history replay
 
 DailyDisk uses one `FSEventStreamCreateRelativeToDevice` session per full-inventory volume. The app persists both the journal UUID and event ID; a newly discovered journal UUID is never substituted for the committed UUID during catch-up validation.
 
@@ -112,6 +112,6 @@ Do not instantiate the system notification center from the bare `DailyDiskAgent`
 Darwin `dev_t` is a signed 32-bit bit pattern. Persist device identities by zero-extending `UInt32(bitPattern: st_dev)` and reconstruct native FSEvents device IDs using the same bit pattern. Direct `UInt64(st_dev)` conversion can trap on mounted volumes with negative device IDs, including hosted macOS runners. Positive stored identities are unchanged; regression coverage includes both signed boundaries and rejects values wider than 32 bits.
 
 
-## W6 daily storage boundary
+## Daily storage boundary
 
-Daily full means complete filesystem observation, not complete database replacement. `SQLiteInventoryStore` compares bounded batches, holds an exact sparse seen-path bitmap, stages only changed keys and detects deletions before E0–E1 replay. A full read audit plus candidate canonical sealing precedes atomic in-place commit. Changed old values supply a short retained logical baseline. Initial scans and legacy recovery still support separate generations. No long-lived read snapshot, per-file last-seen writes, or FSEvents-only daily shortcut is introduced. See Database.md for schema 8 and Testing.md for production-adapter evidence; W6 is a local development branch, not an installed rollout.
+Daily full means complete filesystem observation, not complete database replacement. `SQLiteInventoryStore` compares bounded batches, holds an exact sparse seen-path bitmap, stages only changed keys and detects deletions before E0–E1 replay. A full read audit plus candidate canonical sealing precedes atomic in-place commit. Changed old values supply a short retained logical baseline. Initial scans and legacy recovery still support separate generations. No long-lived read snapshot, per-file last-seen writes, or FSEvents-only daily shortcut is introduced. See Database.md for persistence and Testing.md for regression gates.

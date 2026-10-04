@@ -10,9 +10,9 @@ Daily completion uses actual post-commit inventory completion and report publica
 
 Daily full scans establish a current-journal cursor E0 without replaying yesterday's history, stop that session, traverse, and replay only scan-time events from E0 through a trusted final E1. Validate volume, device, topology and journal identity before commit. Full scanning still needs scan-time event compensation; the checkpoint is an event-consistency boundary, not a resumable traversal position.
 
-## W6 persistence
+## Inventory reuse persistence
 
-Schema 8 preserves schema-7 inventory and reports. With an existing daily baseline, compare bounded batches against current inventory plus the run overlay; persist changed objects and paths only. An exact bounded in-memory seen bitmap detects deletions while preserving opaque subtrees. Unchanged records receive no daily last_seen or membership writes. Initial/legacy full scans may still construct a staging generation.
+With an existing daily baseline, compare bounded batches against current inventory plus the run overlay; persist changed objects and paths only. An exact bounded in-memory seen bitmap detects deletions while preserving opaque subtrees. Unchanged records receive no daily last_seen or membership writes. Initial/legacy full scans may still construct a staging generation.
 
 Commit changed old values, inventory mutations, signed ledger, samples and checkpoint atomically. All in-place incremental commits also preserve old values. Retention prunes only expired published version prefixes and protects referenced generations. Failed or interrupted observations restart after normal overlay cleanup. See [Database](Database.md) for details.
 

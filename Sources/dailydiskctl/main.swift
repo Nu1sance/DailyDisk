@@ -12,6 +12,10 @@ struct DailyDiskCLI {
                 print(DailyDiskProduct.version)
                 return
             }
+            if invocation.command == "build-number" {
+                print(DailyDiskProduct.installedBuildNumber)
+                return
+            }
             if invocation.command == "minimum-system-version" {
                 print(DailyDiskProduct.minimumMacOSVersion)
                 return
@@ -168,7 +172,7 @@ private struct Invocation {
         guard positionals.count <= 1 else { throw CLIError.tooManyArguments }
         let command = positionals.first ?? "help"
         let known = [
-            "help", "version", "minimum-system-version", "sqlite-version",
+            "help", "version", "build-number", "minimum-system-version", "sqlite-version",
             "status", "history", "report", "verify", "diagnostics",
         ]
         guard known.contains(command) else { throw CLIError.unknownCommand(command) }
@@ -205,6 +209,7 @@ private struct Invocation {
           dailydiskctl verify [--database PATH]
           dailydiskctl diagnostics [--database PATH]
           dailydiskctl version
+          dailydiskctl build-number
           dailydiskctl minimum-system-version
           dailydiskctl sqlite-version
 

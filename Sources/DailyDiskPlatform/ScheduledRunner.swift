@@ -16,6 +16,9 @@ public struct DailyDiskScheduledRunner: Sendable {
         }
 
         do {
+            let admission = try RunControlStore()
+            guard let updateLease = try await admission.acquireHelperUpdateLease() else { return 0 }
+            defer { withExtendedLifetime(updateLease) {} }
             let store = try SQLiteInventoryStore()
             try await store.prepare()
             let control = try RunControlStore()

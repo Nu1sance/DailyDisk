@@ -1,3 +1,4 @@
+import DailyDiskCore
 import DailyDiskPlatform
 import Foundation
 import SwiftUI
@@ -8,6 +9,20 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            Section("软件更新") {
+                LabeledContent("版本", value: "\(DailyDiskProduct.version) (\(DailyDiskProduct.installedBuildNumber))")
+                if controller.updatePreparation != nil {
+                    Text("已进入更新准备，新的扫描已暂停。安装完成或放弃安装后，请恢复运行。")
+                    Button("恢复运行") { Task { await controller.restoreAfterUpdate() } }
+                        .disabled(controller.isPreparingUpdate)
+                } else {
+                    Button("准备安装更新") { Task { await controller.prepareForUpdate() } }
+                        .disabled(controller.isPreparingUpdate)
+                    Text("当前需要手动安装。准备操作会在空闲时暂停每日任务，不会下载或安装软件。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+
             Section("每日运行") {
                 LabeledContent("计划时间", value: "每天 05:00")
                 LabeledContent("定时任务", value: launchStatusLabel)

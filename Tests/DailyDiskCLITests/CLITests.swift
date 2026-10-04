@@ -126,3 +126,17 @@ func diagnosticByteFormatting() {
     #expect(DiagnosticFormatter.bytes(-1_024).hasPrefix("-"))
     #expect(DiagnosticFormatter.optionalBytes(nil) == "unknown")
 }
+
+@Test("CLI product metadata agrees with the shared source and rejects build-number options")
+func cliSharedVersion() throws {
+    for (command, expected) in [
+        ("version", DailyDiskProduct.version), ("build-number", DailyDiskProduct.buildNumber),
+        ("minimum-system-version", DailyDiskProduct.minimumMacOSVersion),
+    ] {
+        let result = try runCLI([command])
+        #expect(result.status == 0)
+        #expect(
+            String(decoding: result.stdout, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) == expected)
+    }
+    #expect(try runCLI(["build-number", "--database", "/does/not/exist"]).status == 64)
+}

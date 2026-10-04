@@ -1,4 +1,5 @@
 import AppKit
+import DailyDiskCore
 import DailyDiskPlatform
 import Darwin
 import SwiftUI
@@ -47,7 +48,10 @@ struct DailyDiskApplication: App {
             CommandGroup(replacing: .appInfo) {
                 Button("关于 DailyDisk") {
                     NSApplication.shared.orderFrontStandardAboutPanel(
-                        options: [.applicationName: "DailyDisk", .version: "0.1.0"]
+                        options: [
+                            .applicationName: "DailyDisk", .version: DailyDiskProduct.version,
+                            .applicationVersion: DailyDiskProduct.installedBuildNumber,
+                        ]
                     )
                 }
             }

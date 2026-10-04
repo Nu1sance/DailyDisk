@@ -19,11 +19,11 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>BUILD_REPLACES_VERSION</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>BUILD_REPLACES_NUMBER</string>
     <key>LSMinimumSystemVersion</key>
-    <string>15.0</string>
+    <string>BUILD_REPLACES_MINIMUM_OS</string>
     <key>NSHumanReadableCopyright</key>
     <string>Copyright © DailyDisk contributors.</string>
     <key>NSPrincipalClass</key>

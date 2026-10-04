@@ -39,7 +39,7 @@ All ordinary inspection is in the GUI:
 - **历史** — report selection, session path disclosure, confirmed JSON export; advanced accounting is collapsed
 - **设置 → 通用 / 磁盘权限 / 诊断** — schedule, notifications, full recheck, reset, permissions and expert health information
 
-Both scheduled and manual workers persist progress through the same owner-only Control protocol. A scheduled worker claims the channel only after acquiring the database writer lease; a simultaneous manual request takes priority. On restart, the persisted trigger chooses scheduled recovery or manual recovery. The progress protocol keeps its existing schema. Separate database migrations 003/004 improve large-generation cleanup.
+Both scheduled and manual workers persist progress through the same owner-only Control protocol. A scheduled worker claims the channel only after acquiring the database writer lease; a simultaneous manual request takes priority. On restart, the persisted trigger chooses scheduled recovery or manual recovery. The progress protocol keeps its existing schema.
 
 The open GUI polls for new scheduled work even while idle. It does not repeatedly kickstart a failed helper. A stale progress snapshot plus a stopped helper and free writer lease produces an interruption message after a 15-second observation grace period. Retry remains explicit. An old result stays visible when report inspection is temporarily unavailable.
 
@@ -69,11 +69,11 @@ A full scan does not buffer an entire traversal's live events in memory:
 
 1. Open the current journal without yesterday’s cursor and flush a trusted pre-scan cursor `E0` (daily full). Legacy event-reconciliation recovery may still replay prior history.
 2. Stop that session.
-3. Traverse all metadata; on W6 with a baseline, compare batches and stage differences. Otherwise build a staging generation.
+3. Traverse all metadata; with an existing baseline, compare batches and stage differences. Otherwise build a staging generation.
 4. Open a new historical session from `E0`.
 5. Replay scan-time events into the authoritative overlay; committed inventory remains unchanged until commit.
 6. Flush a final concrete cursor `E1`.
-7. Seal, compare previous and final logical inventory, revalidate identity, then atomically apply W6 deltas with retained old values and E1 (or activate initial/legacy staging).
+7. Seal, compare previous and final logical inventory, revalidate identity, then atomically apply daily inventory reuse deltas with retained old values and E1 (or activate initial/legacy staging).
 
 If the journal cannot cover the interval, the uncommitted delta overlay/staging generation is discarded and a fresh topology/journal recovery is attempted.
 
@@ -179,26 +179,15 @@ Overview and report details list up to five non-overlapping growth entries and u
 
 A changed FSEvents journal UUID invalidates the saved cursor and requires full recovery. File traversal is followed by the separate cancellable `preservingOpaqueInventory` phase when previous unreadable content must be retained. Its counters report completed disjoint roots and newly preserved paths. The GUI must show this work distinctly from traversal. A bounded pager is also required during the subsequent full diff; do not diagnose unchanged traversal counters alone as a stopped helper.
 
-
 ## Reclaiming DailyDisk data space
 
 Open **设置 → 诊断 → 数据占用**. **刷新占用** reads allocated managed-file space, internal reusable database space, and the last successful maintenance result. **回收数据库空间** sends a helper request; it preserves the active baseline and historical reports and does not scan files. The daily helper must be installed and approved, as for manual checks.
 
 Temporary free disk space is required (conservative check: twice the database logical size plus 1 GB). If insufficient, compaction is declined with an explicit message. Do not manually delete the SQLite/WAL files to free space. If a scan or report needs recovery, first run a normal check, then retry maintenance. Cleanup/compaction/verification can take minutes and cannot be cancelled after their boundary; the window can be closed and reopened safely. After a helper crash, the next invocation validates SQLite recovery; a manual maintenance request reports interruption rather than automatically repeating VACUUM.
 
-Automatic compaction is limited by the 1 GB / 25% / seven-day thresholds. This does not make the helper resident. Daily full scanning needs temporary staging/WAL space and can reuse free pages; frequent compaction can force that space to be allocated and written again. Prefer measured free-page reuse rather than daily compression. “本轮自身增长” and “当前数据占用” refer to different times; maintenance never rewrites past accounting. Schema 6 already shares parent/name nodes; W6 reuses unchanged records; further ledger-retention changes require separate measurements and validation.
+Automatic compaction is limited by the 1 GB / 25% / seven-day thresholds. This does not make the helper resident. Daily full scanning needs temporary staging/WAL space and can reuse free pages; frequent compaction can force that space to be allocated and written again. Prefer measured free-page reuse rather than daily compression. “本轮自身增长” and “当前数据占用” refer to different times; maintenance never rewrites past accounting. Inventory shares parent/name nodes; the scanner reuses unchanged records; further ledger-retention changes require separate measurements and validation.
 
-Upgrade the GUI and helper together and restart the GUI. Schema 5 is not readable by an older writer; keep the signing identity, bundle ID and installed path stable. This source change does not itself migrate or compact an installed user's database.
-
-## Historical schema 6 transition
-
-The legacy-to-schema-6 beta transition required a fresh database with explicitly authorized history deletion. This does not apply to schema 7/8 upgrades; preserve existing history and checkpoints. Update the GUI/helper together and restart the GUI. The first new report is an opening balance; the next successful report begins growth comparisons.
-
-### Missing helper after reinstall
-
-After replacing or reinstalling the app, SMAppService can still report enabled while `launchctl print` reports that the helper job is missing. A manual request then remains queued with zero progress, and the GUI eventually shows “检查未完成 / 后台任务没有继续运行”; retrying kickstart alone cannot recreate the job. On a start request, DailyDisk now distinguishes a missing job from a loaded, stopped job and repairs only the enabled-but-missing case with one SMAppService unregister/register cycle. It preserves the queued request, rechecks approval and runtime state, and attaches if RunAtLoad has already started the helper. Unknown inspection errors, registration failures and a still-missing job stop recovery; polling does not become a persistent repair loop. Existing running/idle jobs are not re-registered. No history reset is needed.
-
-Overlapping GUI refresh/start requests share the effect of a registration change: a caller whose missing-job inspection predates another registration attempt rechecks status instead of unregistering again. Failed repair attempts also invalidate stale observations. A later explicit start may retry; there is no automatic repair loop.
+Upgrade the GUI and helper together and restart the GUI. Older writers may not read a newer database; keep the signing identity, bundle ID and installed path stable. This source change does not itself migrate or compact an installed user's database.
 
 ## Diagnosing unexpected full recovery
 
@@ -220,10 +209,7 @@ Mailbox trust loss now aborts replay cooperatively before consuming further queu
 
 Private ScanProbes records include optional `processWriteBytes` on helper start/end, request start/end and phase changes. Counters are sampled when the event is enqueued, not when the log queue writes it. Compare only records with the same process identity; a missing field means the OS counter was unavailable. These are process-attributed disk writes, not file allocation or SSD NAND wear, and exclude notification child processes. They enable one naturally due full-run acceptance without repeatedly scanning user data.
 
-Schema 7 preserves schema-6 inventory and historical reports. The old schema-6 reset instructions above describe the earlier beta transition and must not be repeated for this upgrade.
-
-
-W6 source adds the cancellable **正在核对已删除的文件** phase after traversal. Its exact seen bitmap is memory-only, so a stopped run restarts comparison after normal abandoned-overlay cleanup; it never resumes deletion inference from incomplete coverage. Successful daily checks normally retain one current inventory plus 24-hour changed old values. Initial/legacy recovery generations may still coexist temporarily. Rebuild GUI/helper/CLI together before installing. See Testing.md for regression gates.
+The helper exposes the cancellable **正在核对已删除的文件** phase after traversal. Its exact seen bitmap is memory-only, so a stopped run restarts comparison after normal abandoned-overlay cleanup; it never resumes deletion inference from incomplete coverage. Successful daily checks normally retain one current inventory plus 24-hour changed old values. Initial/legacy recovery generations may still coexist temporarily. Rebuild GUI/helper/CLI together before installing. See Testing.md for regression gates.
 
 ## Inspecting chart values and path visibility
 

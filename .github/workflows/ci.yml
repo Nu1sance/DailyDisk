@@ -24,8 +24,8 @@ jobs:
         run: swift test
       - name: Check CLI behavior
         run: |
-          test "$(swift run --skip-build dailydiskctl version)" = "0.1.0"
-          test "$(swift run --skip-build dailydiskctl minimum-system-version)" = "15.0"
+          test "$(swift run --skip-build dailydiskctl version)" = "$(plutil -extract version raw Sources/DailyDiskCore/Resources/Product.json)"
+          test "$(swift run --skip-build dailydiskctl minimum-system-version)" = "$(plutil -extract minimumMacOSVersion raw Sources/DailyDiskCore/Resources/Product.json)"
           swift run --skip-build dailydiskctl sqlite-version | grep -E '^[0-9]+\.[0-9]+'
           if swift run --skip-build dailydiskctl version unexpected; then
             echo "CLI accepted an unexpected argument" >&2
@@ -38,6 +38,10 @@ jobs:
             exit 1
           fi
           grep -q 'persistent CODE_SIGN_IDENTITY is required' /tmp/unexpected-build.log
+      - name: Test release version inputs
+        run: Scripts/test-version-config.sh
+      - name: Test installer safety
+        run: Scripts/test-install-app.sh
       - name: Lint LaunchAgent
         run: Scripts/lint-launch-agent.sh
       - name: Assemble explicitly development-only ad-hoc signed app
@@ -48,9 +52,10 @@ jobs:
           test -x "$APP/Contents/MacOS/DailyDisk"
           test -x "$APP/Contents/Helpers/DailyDiskAgent"
           test -x "$APP/Contents/Helpers/dailydiskctl"
-          test "$(plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist")" = "0.1.0"
-          test "$(plutil -extract LSMinimumSystemVersion raw "$APP/Contents/Info.plist")" = "15.0"
-          test "$($APP/Contents/Helpers/dailydiskctl version)" = "0.1.0"
+          test "$(plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist")" = "$(plutil -extract version raw Sources/DailyDiskCore/Resources/Product.json)"
+          test "$(plutil -extract LSMinimumSystemVersion raw "$APP/Contents/Info.plist")" = "$(plutil -extract minimumMacOSVersion raw Sources/DailyDiskCore/Resources/Product.json)"
+          test "$($APP/Contents/Helpers/dailydiskctl version)" = "$(plutil -extract version raw Sources/DailyDiskCore/Resources/Product.json)"
+          test "$("$APP/Contents/Helpers/dailydiskctl" build-number)" = "$(plutil -extract CFBundleVersion raw "$APP/Contents/Info.plist")"
           codesign --verify --deep --strict "$APP"
           cmp App/DailyDisk/LaunchAgents/io.github.xiuyuwu.DailyDisk.agent.plist \
             "$APP/Contents/Library/LaunchAgents/io.github.xiuyuwu.DailyDisk.agent.plist"

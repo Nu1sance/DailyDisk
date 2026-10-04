@@ -19,6 +19,7 @@ public actor RunControlStore: ScanProgressReporting, ScanCancellationChecking, S
         case summary = "summary.json"
         case helperIdle = "helper-idle.json"
         case lock = ".control.lock"
+        case update = "update-preparation.json"
     }
 
     private let rootURL: URL
@@ -76,6 +77,72 @@ public actor RunControlStore: ScanProgressReporting, ScanCancellationChecking, S
         close(lockFileDescriptor)
     }
 
+    private static let updateKeys: Set<String> = ["version", "id", "restoreDailyTask", "phase"]
+
+    private func readUpdate() throws -> UpdatePreparation? {
+        let state = try readIfPresent(UpdatePreparation.self, from: .update, allowedKeys: Self.updateKeys)
+        guard state == nil || state?.version == 1 else { throw UpdatePreparationError.invalidState }
+        return state
+    }
+
+    public func updatePreparation() throws -> UpdatePreparation? {
+        try withLock {
+            try validateRoot()
+            return try readUpdate()
+        }
+    }
+
+    public func requireUpdatesInactive() throws {
+        try withLock {
+            try validateRoot()
+            guard try readUpdate() == nil else { throw RunControlStoreError.updateInProgress }
+        }
+    }
+
+    public func acquireHelperUpdateLease() throws -> UpdateWorkLease? {
+        try withLock {
+            try validateRoot()
+            guard try readUpdate() == nil else { return nil }
+            return try UpdateWorkLease(url: rootURL.appendingPathComponent(".update-work.lock"), exclusive: false)
+        }
+    }
+
+    public func beginUpdatePreparation(restoreDailyTask: Bool) throws -> UpdatePreparation {
+        try withLock {
+            try validateRoot()
+            guard try readUpdate() == nil else { throw RunControlStoreError.updateInProgress }
+            let lease = try UpdateWorkLease(url: rootURL.appendingPathComponent(".update-work.lock"), exclusive: true)
+            defer { withExtendedLifetime(lease) {} }
+            guard !fileExists(.active), !fileExists(.pending) else { throw UpdatePreparationError.busy }
+            let state = UpdatePreparation(restoreDailyTask: restoreDailyTask)
+            try write(state, to: .update, allowedKeys: Self.updateKeys)
+            return state
+        }
+    }
+
+    public func setUpdatePhase(id: UUID, phase: UpdatePreparation.Phase) throws {
+        try withLock {
+            try validateRoot()
+            guard var state = try readUpdate(), state.id == id else { throw UpdatePreparationError.invalidState }
+            guard phase == .restoring || (state.phase == .preparing && phase == .ready) else {
+                throw UpdatePreparationError.invalidState
+            }
+            state.phase = phase
+            try write(state, to: .update, allowedKeys: Self.updateKeys)
+        }
+    }
+
+    public func finishUpdateRestoration(id: UUID) throws {
+        try withLock {
+            try validateRoot()
+            guard let state = try readUpdate(), state.id == id, state.phase == .restoring else {
+                throw UpdatePreparationError.invalidState
+            }
+            try removeIfPresent(.update)
+            try syncDirectory()
+        }
+    }
+
     public func clearHelperIdle() async throws {
         try withLock {
             try validateRoot()
@@ -116,6 +183,7 @@ public actor RunControlStore: ScanProgressReporting, ScanCancellationChecking, S
     public func enqueue(_ request: DailyDiskRunRequest) async throws {
         try withLock {
             try validateRoot()
+            guard try readUpdate() == nil else { throw RunControlStoreError.updateInProgress }
             if fileExists(.active) { throw RunControlStoreError.runAlreadyActive }
             if fileExists(.pending) { throw RunControlStoreError.requestAlreadyPending }
             try removeIfPresent(.cancellation)
@@ -139,6 +207,7 @@ public actor RunControlStore: ScanProgressReporting, ScanCancellationChecking, S
     public func beginScheduledRun(_ request: DailyDiskRunRequest) async throws {
         try withLock {
             try validateRoot()
+            guard try readUpdate() == nil else { throw RunControlStoreError.updateInProgress }
             guard !fileExists(.active), !fileExists(.pending) else {
                 throw RunControlStoreError.runAlreadyActive
             }
@@ -161,6 +230,7 @@ public actor RunControlStore: ScanProgressReporting, ScanCancellationChecking, S
     public func claimPendingRequest() async throws -> DailyDiskRunRequest? {
         try withLock {
             try validateRoot()
+            guard try readUpdate() == nil else { throw RunControlStoreError.updateInProgress }
             if fileExists(.active) { throw RunControlStoreError.runAlreadyActive }
             guard fileExists(.pending) else { return nil }
             let request: DailyDiskRunRequest
@@ -957,6 +1027,7 @@ public actor RunControlStore: ScanProgressReporting, ScanCancellationChecking, S
 }
 
 public enum RunControlStoreError: Error, Equatable, Sendable {
+    case updateInProgress
     case requestAlreadyPending
     case runAlreadyActive
     case requestIDMismatch

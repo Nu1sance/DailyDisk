@@ -27,6 +27,10 @@ final class AppController: ObservableObject {
     @Published private(set) var errorMessage: String?
     @Published private(set) var actionMessage: String?
 
+    @Published private(set) var updatePreparation: UpdatePreparation?
+    @Published private(set) var isPreparingUpdate = false
+    private let updateCoordinator: UpdateCoordinator?
+
     private let accessProbe: any FullDiskAccessProbing
     private let notificationManager: any NotificationAuthorizationManaging
     private let volumeDiscovery: any VolumeDiscovering
@@ -66,6 +70,7 @@ final class AppController: ObservableObject {
         self.volumeDiscovery = volumeDiscovery
         self.launchAgentManager = launchAgentManager
         self.controlStore = controlStore
+        self.updateCoordinator = controlStore.map { UpdateCoordinator(control: $0, manager: launchAgentManager) }
         self.inspectionService = inspectionService
         self.dataResetter = dataResetter ?? DailyDiskDataResetter()
         self.pollingInterval = pollingInterval
@@ -80,6 +85,7 @@ final class AppController: ObservableObject {
         guard !isRefreshing else { return }
         isRefreshing = true
         errorMessage = nil
+        await refreshUpdatePreparation()
         await refreshScanState()
         startProgressPolling()
         async let access = accessProbe.probe()
@@ -121,6 +127,7 @@ final class AppController: ObservableObject {
         requestedMode: DailyDiskRequestedScanMode = .automatic,
         action: DailyDiskRunRequestAction = .scanNow
     ) async {
+        guard await allowNormalWork() else { return }
         guard !scanState.isActive, !isSubmittingScanRequest else { return }
         isSubmittingScanRequest = true
         defer { isSubmittingScanRequest = false }
@@ -412,7 +419,57 @@ final class AppController: ObservableObject {
     func openFullDiskAccessSettings() { FullDiskAccessProbe.openSystemSettings() }
     func openNotificationSettings() { NotificationManager.openSystemSettings() }
 
+    private func refreshUpdatePreparation() async {
+        do { updatePreparation = try await controlStore?.updatePreparation() } catch {
+            errorMessage = "无法读取更新准备状态，请检查本地控制文件。"
+        }
+    }
+
+    private func allowNormalWork() async -> Bool {
+        guard !isPreparingUpdate else { return false }
+        do {
+            try await controlStore?.requireUpdatesInactive()
+            return true
+        } catch {
+            errorMessage = "已暂停运行以安装更新，请先在设置中恢复运行。"
+            return false
+        }
+    }
+
+    func prepareForUpdate() async {
+        guard !isPreparingUpdate, let updateCoordinator else { return }
+        isPreparingUpdate = true
+        defer { isPreparingUpdate = false }
+        do {
+            try await updateCoordinator.prepare()
+            errorMessage = nil
+            actionMessage = "已暂停每日任务。请退出应用后安装更新，重新打开后恢复运行。"
+        } catch UpdatePreparationError.busy {
+            errorMessage = "请等待扫描及报告保存完成后，再准备安装更新。"
+        } catch {
+            errorMessage = "无法完成更新准备。若任务已暂停，可在设置中恢复运行后重试。"
+        }
+        await refreshUpdatePreparation()
+        launchAgentStatus = await launchAgentManager.status()
+    }
+
+    func restoreAfterUpdate() async {
+        guard !isPreparingUpdate, let updateCoordinator else { return }
+        isPreparingUpdate = true
+        defer { isPreparingUpdate = false }
+        do {
+            try await updateCoordinator.restore()
+            errorMessage = nil
+            actionMessage = "已结束更新准备并恢复原任务设置。"
+        } catch {
+            errorMessage = "暂时无法恢复运行。请确认安装已结束后重试；安装锁残留时按安装文档处理。"
+        }
+        await refreshUpdatePreparation()
+        launchAgentStatus = await launchAgentManager.status()
+    }
+
     func installDailyRun() async {
+        guard await allowNormalWork() else { return }
         guard !scanState.isActive else { return }
         scanState = .requesting
         errorMessage = nil
@@ -436,6 +493,7 @@ final class AppController: ObservableObject {
     }
 
     func uninstallDailyRun() async {
+        guard await allowNormalWork() else { return }
         do {
             try await launchAgentManager.unregister()
             launchAgentStatus = await launchAgentManager.status()
@@ -500,6 +558,7 @@ final class AppController: ObservableObject {
     }
 
     func resetHistory() async {
+        guard await allowNormalWork() else { return }
         guard !scanState.isActive else {
             errorMessage = "请先等待或停止当前扫描。"
             return
@@ -564,6 +623,7 @@ final class AppController: ObservableObject {
     }
 
     private func ensureOutstandingRequestIsStarted() async {
+        guard await allowNormalWork() else { return }
         guard let controlStore, launchAgentStatus == .enabled else { return }
         let hasActive = (try? await controlStore.activeRequest()) != nil
         let hasPending = (try? await controlStore.pendingRequest()) != nil

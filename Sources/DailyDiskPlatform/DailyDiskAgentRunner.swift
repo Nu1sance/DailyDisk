@@ -30,6 +30,8 @@ public struct DailyDiskAgentRunner: Sendable {
     private func runObserved() async -> Int32 {
         do {
             let controlStore = try RunControlStore()
+            guard let updateLease = try await controlStore.acquireHelperUpdateLease() else { return 0 }
+            defer { withExtendedLifetime(updateLease) {} }
             try await controlStore.clearHelperIdle()
             var exitCode: Int32 = 0
 

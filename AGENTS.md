@@ -91,7 +91,7 @@ Its label is:
 io.github.xiuyuwu.DailyDisk.agent
 ```
 
-Source runs at 05:00 local time and at login for due/catch-up evaluation. Upgrade the installed GUI/helper and registered job together; an older registration may still use 09:00. `KeepAlive` is false, so persistent failures do not create a retry storm.
+Source runs at 05:00 local time and at login for due/catch-up evaluation. Upgrade the installed GUI/helper and registered job together and verify the registered schedule. `KeepAlive` is false, so persistent failures do not create a retry storm.
 
 ## 5. Core architecture
 
@@ -137,7 +137,7 @@ A full scan uses two event sessions:
 4. Open a second historical session from `E0`.
 5. Replay scan-time events into the same target overlay.
 6. Flush a final trusted cursor `E1` and revalidate topology and journal identity.
-7. Seal and atomically commit inventory changes, accounting and `E1`; W6 retains the active generation ID and changed old values.
+7. Seal and atomically commit inventory changes, accounting and `E1`; daily inventory reuse retains the active generation ID and changed old values.
 
 This avoids buffering the entire full-scan interval in memory.
 
@@ -188,9 +188,9 @@ Hard links are keyed by volume/device/inode and receive one canonical attributio
 
 ## 7. Build and test
 
-For another user's checkout, follow `Docs/Installation.md`. A stock Mac may require `xcode-select --install`; check Swift 6+ and a matching macOS 15+ SDK. SwiftPM downloads the dependencies pinned in `Package.resolved`. No Homebrew/Python/Node/database-server dependency is required. Full Xcode is optional for the locally tested Command Line Tools build. Persistent signing identities are per-user and are not supplied by the repo; do not imply that permissions or the author's certificate transfer via GitHub.
+For another user's checkout, follow `Docs/Installation.md`. A stock Mac may require `xcode-select --install`; check Swift 6+ and a matching macOS 15+ SDK. SwiftPM downloads the dependencies pinned in `Package.resolved`. No Homebrew/Python/Node/database-server dependency is required. Full Xcode is optional for a compatible Command Line Tools build. Persistent signing identities are per-user and are not supplied by the repo; do not imply that permissions or the author's certificate transfer via GitHub.
 
-Current packaging builds the host architecture. Apple Silicon has local acceptance evidence; Intel/fresh-Mac installation and history-page visual acceptance remain incomplete. CI configuration is not evidence of all-machine compatibility. There is no notarization, release installer, universal build, or automatic-update pipeline.
+Current packaging builds the host architecture. Intel/fresh-Mac installation and history-page visual acceptance require separate acceptance. CI configuration is not evidence of all-machine compatibility. There is no notarization, release installer, universal build, or automatic-update pipeline.
 
 Basic verification:
 
@@ -451,9 +451,9 @@ Both manual and scheduled work publish real progress and share cooperative cance
 
 Control JSON uses whole-second ISO8601 timestamps; comparisons against in-memory dates must use that wire precision. Regression tests must include fractional timestamps and actual persisted progress, not only no-op trackers or integer epoch fixtures.
 
-### Generation cleanup (schema 4)
+### Generation cleanup
 
-Migration 003 adds a composite path/object lookup index. Migration 004 adds a generation-delete trigger that removes canonical rows and paths in sets before removing objects. SQLite can otherwise prefer a generation-only lookup even when a more selective index exists; deleting a large failed/staging generation then repeatedly scans its entire path set. The trigger keeps foreign keys and transaction rollback intact, including protection of the active checkpoint. Regression coverage upgrades a v2 schema and cancels a 10,000-record staging generation while preserving the active baseline.
+A composite path/object lookup index and a generation-delete trigger remove canonical rows and paths in sets before removing objects. SQLite can otherwise prefer a generation-only lookup even when a more selective index exists; deleting a large failed/staging generation then repeatedly scans its entire path set. The trigger keeps foreign keys and transaction rollback intact, including protection of the active checkpoint. Regression coverage tests migration and cancels a 10,000-record staging generation while preserving the active baseline.
 
 Overview refresh uses lightweight WAL-aware read-only queries. Complete database verification and table-size diagnostics run only via **设置 → 诊断 → 验证数据库** (or the strict CLI); opening the app must not trigger a full integrity scan or prevent recovery of a nonempty WAL. An unverified overview is never labeled healthy.
 
@@ -507,25 +507,23 @@ Opaque roots are deduplicated and reduced to disjoint subtrees before reading. O
 
 The cancellable `preservingOpaqueInventory` phase separates history preservation from file traversal. `preservedPaths` and `processedOpaqueRoots` are cumulative, path-free progress counters; missing fields from old progress files decode as zero. Update GUI and helper together and restart the GUI on upgrade because old binaries do not understand the new phase/fields. Temporary identity counters finalize their statements and close SQLite before deleting their private files.
 
-### Space maintenance (schema 5)
+### Space maintenance
 
-Migration 005 adds retirement timestamps and a singleton maintenance record. Existing retired inventory gets a fresh 24-hour window at migration. Retirements are stamped at activation; idle cleanup waits for replacement report publication and absence of running/staging/overlay or pending-report recovery work. Keep the latest retired generation for 24 hours; older ones may be pruned after replacement publication. Preserve active/checkpoint references, historical reports, ledger and samples. Cleanup runs before new work and after report publication, outside activation; expiry does not wake a resident process.
+Retirement timestamps and a maintenance record track cleanup eligibility. Retirements are stamped at activation; idle cleanup waits for replacement report publication and absence of running/staging/overlay or pending-report recovery work. Keep the latest retired generation for 24 hours; older ones may be pruned after replacement publication. Preserve active/checkpoint references, historical reports, ledger and samples. Cleanup runs before new work and after report publication, outside activation; expiry does not wake a resident process.
 
 The `reclaimSpace` Control action runs only in DailyDiskAgent. Automatic evaluation uses >1 GB freelist, >25% free pages, and seven days since the last attempt. Manual requests bypass thresholds only. Native VACUUM preflights two database sizes plus 1 GB reserve, uses the existing writer/stable leases, and never swaps database files. Persist a maintenance marker, bracket compaction with integrity/FK/basis checks, and verify interrupted maintenance before further work. A resumed manual request requires explicit retry after verification. Do not alter past overhead/physical sample boundaries.
 
 Cleanup, compression and verification use non-cancellable Control boundaries and truthful phase-only UI; automatic maintenance returns to cancellable scan preparation afterward. `maintenanceCompleted` has zero completed domains and no report IDs. Upgrade GUI/helper together and restart the GUI for the new action, phases and categories. Settings reads allocation/freelist explicitly; normal GUI polling must not run dbstat, table counts or integrity scans.
 
-### Compact inventory (schema 6)
+### Compact inventory
 
 Production inventory now uses integer generation/volume keys, immutable parent/name nodes and a generation-local full raw-path ordering table. The three legacy inventory names are read-only compatibility views; write compact tables directly with batch-scoped prepared statements. Preserve statement reset on error and discard cached IDs across rollback. Full sealing audits ordering completeness/equivalence; incremental sealing audits candidate identities only. Explicit verification and maintenance audit retained inventory. Idle node collection uses a bounded leaf queue, not repeated full-tree sweeps. See Docs/Database.md.
 
-Internal-beta transition uses a fresh database; no old-inventory conversion, dedicated error type, Control category or reset-required UI branch is retained. Keep the migration's empty-database precondition as a generic consistency check: dropping inventory while preserving an old checkpoint is invalid. Upgrade GUI/helper together and use the same persistent signing identity. Schema 7/8 upgrades preserve existing compact inventory and reports; do not repeat the legacy reset.
-
 Incremental attribution must join `hybrid_generations` and `hybrid_objects` directly using the integer generation key plus `(device_id, inode)`. A LEFT JOIN against the `inventory_objects` compatibility view can materialize the complete generation for every surviving candidate. Preserve outer-join behavior for newly created objects. Both per-identity and streamed overlay attribution use this rule. Path-mutation accounting likewise joins compact ordering/path/volume tables by the candidate path, avoiding a generation-wide materialization of `inventory_paths`. The million-row workload must include surviving modifications, new objects, renames and hard links; deletion-only increments bypass the expensive branch and cannot validate its performance.
 
-### Daily full and W6 persistence (schema 7/8)
+### Daily full persistence
 
-Migration 008 adds old-value recovery tables without copying or resetting existing inventory/reports. Subsequent daily full scans compare 1,024-record batches with 256-path prefetches against the current baseline plus run overlay; unchanged objects/paths/order/canonical are reused. Metadata-only changes stage/apply object values without path mutations or live canonical rewrites. Preserve hard-link observation order across batches. Exact sparse seen bits mark existing node IDs, never every row's last_seen; payload is capped at 64 MiB plus map overhead. Incomplete/failed comparisons cannot seal and must restart.
+Changed old values are retained in recovery tables without copying the complete inventory. Subsequent daily full scans compare 1,024-record batches with 256-path prefetches against the current baseline plus run overlay; unchanged objects/paths/order/canonical are reused. Metadata-only changes stage/apply object values without path mutations or live canonical rewrites. Preserve hard-link observation order across batches. Exact sparse seen bits mark existing node IDs, never every row's last_seen; payload is capped at 64 MiB plus map overhead. Incomplete/failed comparisons cannot seal and must restart.
 
 Deletion detection pages by generation/path ID and excludes opaque raw-byte subtrees. `comparingInventory` is a new cancellable Control phase, requiring GUI/helper upgrades together. E0–E1 compensation updates the same difference overlay. Full ordering auditing reads the base; canonical/ledger work is identity-bounded. Preserve the explicit mutation object index/range in canonicalOverlayPath: high-churn testing found target-prefix scans became quadratic.
 
@@ -541,4 +539,12 @@ Keep current architecture, operational instructions and reproducible synthetic t
 - Preserve high-churn, opaque-subtree, hard-link, interruption and disk-full recovery coverage when optimizing writes.
 - Keep fresh-Mac/Intel and signed permission/notification acceptance separate from automated test results.
 
-W6 deletion detection uses an in-memory opaque path index: exact raw-byte roots plus merged descendant intervals, queried by binary search. Preserve slash boundaries and non-UTF-8 bytes; a neighboring name may sort between a root and its descendants, so a predecessor search over root names alone is incorrect. This index changes no persistence or opaque-preservation semantics.
+Inventory deletion detection uses an in-memory opaque path index: exact raw-byte roots plus merged descendant intervals, queried by binary search. Preserve slash boundaries and non-UTF-8 bytes; a neighboring name may sort between a root and its descendants, so a predecessor search over root names alone is incorrect. This index changes no persistence or opaque-preservation semantics.
+
+Before updating an existing installation, finish scans, remove the daily task in Settings, quit the GUI and close CLI inspections. Rebuild with the original signing identity, then reopen the app and enable the daily task again. The installer validates signatures, refuses active/registered workers and restores the previous app on replacement failure. See Docs/Installation.md for interruption recovery and database rollback limits.
+
+### Version metadata and update preparation
+
+Product.json in DailyDiskCore/Resources is the shared version, source build number and minimum OS source. Packaging replaces Info.plist placeholders; embedded CLI build-number reads the enclosing app's build number. RELEASE_BUILD=1 requires explicit BUILD_NUMBER greater than explicit PREVIOUS_BUILD_NUMBER (0 for first release); this local validation does not yet verify remote release history or perform notarization.
+
+Settings offers explicit Prepare Update / Resume actions, not an automatic updater. Preparation refuses active helpers/writers or queued/active requests, durably saves the original enabled state, blocks new requests and unregisters the task. Helpers hold a shared update-work lease for their entire invocation; marker publication requires exclusive admission under the Control lock. Update state is fixed-schema, private and atomic. Never expire it on a timer. Restart presents explicit recovery; only restore a task that was previously enabled, and surface required system approval. Restoration and preparation share the shell installer's directory lock. A stale lock requires inspection, not automatic removal. Upgrade GUI/helper together; older binaries do not enforce this gate.

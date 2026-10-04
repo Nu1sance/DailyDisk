@@ -7,7 +7,11 @@ OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/build}"
 APP_NAME="DailyDisk.app"
 FINAL_APP="$OUTPUT_DIR/$APP_NAME"
 BUNDLE_IDENTIFIER="${BUNDLE_IDENTIFIER:-io.github.xiuyuwu.DailyDisk}"
-BUILD_NUMBER="${BUILD_NUMBER:-1}"
+PRODUCT_METADATA="$ROOT/Sources/DailyDiskCore/Resources/Product.json"
+SOURCE_BUILD_NUMBER="$(/usr/bin/plutil -extract buildNumber raw "$PRODUCT_METADATA")"
+EXPLICIT_BUILD_NUMBER="${BUILD_NUMBER:-}"
+BUILD_NUMBER="${BUILD_NUMBER:-$SOURCE_BUILD_NUMBER}"
+RELEASE_BUILD="${RELEASE_BUILD:-0}"
 CODE_SIGN_IDENTITY="${CODE_SIGN_IDENTITY:--}"
 CODE_SIGN_TIMESTAMP="${CODE_SIGN_TIMESTAMP:-secure}"
 ALLOW_ADHOC_SIGNING="${ALLOW_ADHOC_SIGNING:-0}"
@@ -35,9 +39,24 @@ if [[ ! "$BUNDLE_IDENTIFIER" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*[A-Za-z0-9]$ ]] \
     exit 64
 fi
 
-if [[ ! "$BUILD_NUMBER" =~ ^[0-9]+$ ]]; then
-    echo "error: BUILD_NUMBER must contain only decimal digits" >&2
+if [[ ! "$BUILD_NUMBER" =~ ^[1-9][0-9]{0,8}$ ]]; then
+    echo "error: BUILD_NUMBER must be a positive integer of at most nine digits" >&2
     exit 64
+fi
+
+if [[ "$RELEASE_BUILD" == "1" ]]; then
+    if [[ -z "$EXPLICIT_BUILD_NUMBER" || ! "${PREVIOUS_BUILD_NUMBER:-}" =~ ^(0|[1-9][0-9]{0,8})$ ]]; then
+        echo 'error: release builds require explicit BUILD_NUMBER and PREVIOUS_BUILD_NUMBER (0 for first release)' >&2
+        exit 64
+    fi
+    if (( BUILD_NUMBER <= PREVIOUS_BUILD_NUMBER )); then
+        echo 'error: release BUILD_NUMBER must exceed PREVIOUS_BUILD_NUMBER' >&2
+        exit 64
+    fi
+    if [[ "$CODE_SIGN_IDENTITY" == "-" ]]; then
+        echo 'error: release builds require a persistent signing identity' >&2
+        exit 64
+    fi
 fi
 
 if [[ "$CODE_SIGN_IDENTITY" == "-" ]]; then
@@ -54,6 +73,24 @@ ERROR
 warning: using development-only ad-hoc signing because ALLOW_ADHOC_SIGNING=1.
          Do not rely on privacy grants surviving rebuilds.
 WARNING
+fi
+
+# Never assemble directly over an installed bundle, bypassing install safeguards.
+mkdir -p "$OUTPUT_DIR"
+OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd -P)"
+FINAL_APP="$OUTPUT_DIR/$APP_NAME"
+case "$OUTPUT_DIR" in
+    /Applications|"$HOME/Applications")
+        echo 'error: OUTPUT_DIR must be separate from installed Applications directories' >&2
+        exit 64 ;;
+esac
+if [[ "$INSTALL_APP" == 1 ]]; then
+    mkdir -p "$INSTALL_DIR"
+    INSTALL_DIR="$(cd "$INSTALL_DIR" && pwd -P)"
+    [[ "$OUTPUT_DIR" != "$INSTALL_DIR" ]] || {
+        echo 'error: OUTPUT_DIR and INSTALL_DIR must differ' >&2
+        exit 64
+    }
 fi
 
 swift build \
@@ -78,7 +115,10 @@ STAGING_ROOT="$(mktemp -d "$OUTPUT_DIR/.dailydisk-build.XXXXXX")"
 STAGING_APP="$STAGING_ROOT/$APP_NAME"
 BACKUP_APP="$OUTPUT_DIR/.DailyDisk.app.previous.$$"
 cleanup() {
-    rm -rf "$STAGING_ROOT" "$BACKUP_APP"
+    rm -rf "$STAGING_ROOT"
+    if [[ -e "$BACKUP_APP" ]]; then
+        echo "Previous build preserved at $BACKUP_APP" >&2
+    fi
 }
 trap cleanup EXIT
 
@@ -171,15 +211,7 @@ rm -rf "$BACKUP_APP"
 
 echo "Built $FINAL_APP"
 if [[ "$INSTALL_APP" == "1" ]]; then
-    mkdir -p "$INSTALL_DIR"
-    INSTALL_TARGET="$INSTALL_DIR/$APP_NAME"
-    INSTALL_STAGING="$INSTALL_DIR/.DailyDisk.installing.$$"
-    rm -rf "$INSTALL_STAGING"
-    /usr/bin/ditto "$FINAL_APP" "$INSTALL_STAGING"
-    codesign --verify --deep --strict "$INSTALL_STAGING"
-    rm -rf "$INSTALL_TARGET"
-    mv "$INSTALL_STAGING" "$INSTALL_TARGET"
-    echo "Installed $INSTALL_TARGET"
+    "$ROOT/Scripts/install-app.sh" "$FINAL_APP" "$INSTALL_DIR"
 fi
 echo "Bundle identifier: $BUNDLE_IDENTIFIER"
 echo "Product version: $PRODUCT_VERSION ($BUILD_NUMBER)"

@@ -23,7 +23,7 @@ let package = Package(
     ],
     targets: [
         .systemLibrary(name: "CSQLite"),
-        .target(name: "DailyDiskCore"),
+        .target(name: "DailyDiskCore", resources: [.process("Resources")]),
         .target(
             name: "DailyDiskStore",
             dependencies: ["DailyDiskCore", "CSQLite"],

@@ -29,7 +29,7 @@ APFS clones and shared extents cannot be deduplicated accurately with ordinary `
 
 ## Daily-full target and accounting compatibility
 
-Daily full scans compare previous committed inventory directly with the final logical inventory (staging for an initial/legacy build, or baseline plus W6 deltas). `snapshotComparison` ledger records use addition/removal/modification/attribution-transfer kinds and contribute to `snapshotComparedDelta`. They are not event attribution or reconciliation errors. Same-day incremental checks and legacy recovery retain their existing decomposition. Old JSON payloads decode the absent snapshot field as zero; they are not rewritten. Migration 007 adds a matching aggregate column. Ordinary daily differences do not feed correction alerts.
+Daily full scans compare previous committed inventory directly with the final logical inventory (staging for an initial/legacy build, or baseline plus daily inventory reuse deltas). `snapshotComparison` ledger records use addition/removal/modification/attribution-transfer kinds and contribute to `snapshotComparedDelta`. They are not event attribution or reconciliation errors. Same-day incremental checks and legacy recovery retain their existing decomposition. Existing reports remain readable after updates. Ordinary daily differences do not feed correction alerts.
 
 ```text
 reconciledIndexedDelta = snapshotComparedDelta + eventAttributedDelta + reconciliationCorrection
@@ -114,5 +114,4 @@ Reports are persisted separately and idempotently after the referenced scan ledg
 
 Inventory paths are stored relative to their volume as raw bytes. DailyDisk does not Unicode-normalize, case-fold, resolve symlinks, or accept `.`/`..` traversal components. Display strings are lossy views only; raw bytes remain authoritative.
 
-
-W6 keeps the active generation ID on subsequent daily full checks, but the before/after boundary is still the previous committed checkpoint versus the newly sealed inventory. Reusing storage does not turn the run into incremental accounting. Snapshot changes are derived and validated for candidate identities; unchanged objects contribute zero. Old-value recovery rows are storage metadata and never additional growth ledger entries. Physical and DailyDisk-overhead sampling boundaries remain unchanged.
+daily inventory reuse keeps the active generation ID on subsequent daily full checks, but the before/after boundary is still the previous committed checkpoint versus the newly sealed inventory. Reusing storage does not turn the run into incremental accounting. Snapshot changes are derived and validated for candidate identities; unchanged objects contribute zero. Old-value recovery rows are storage metadata and never additional growth ledger entries. Physical and DailyDisk-overhead sampling boundaries remain unchanged.

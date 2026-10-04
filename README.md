@@ -2,11 +2,11 @@
 
 DailyDisk is a GUI-first, source-built macOS disk-growth monitor. Click **立即检查** to start a background scan, follow phase/count progress, close and reopen the window without stopping work, browse history and diagnostics, or keep the automatic daily run. DailyDisk compares the current internal APFS inventory with its previous state, attributes file growth, records signed reconciliation corrections, and keeps physical APFS differences separate when they cannot safely be assigned to a path.
 
-## Internal-beta storage transition
+## Current storage design
 
-The current implementation uses W6 with schema 8. Daily full checks still read all file metadata, but subsequent checks persist only changes to the current inventory, with old values retained for a short recovery window. Unchanged files do not receive daily `last_seen` updates or new generation membership. Initial baselines still require a complete build. See [the daily-full design](Docs/DailyFullScan.md) for persistence and measurement limits.
+Full scans read all file metadata and persist only differences from the previous inventory. Unchanged records are reused; changed old values are retained briefly for recovery. Initial scans build the complete opening inventory.
 
-Migrations 007/008 preserve existing schema-6/7 inventory, checkpoints and historical reports; do not reset history for this update. GUI/helper/CLI must be updated together because W6 adds a progress phase. The earlier legacy-to-schema-6 fresh-database transition does not apply.
+Updates preserve supported existing inventories, checkpoints and reports. Update GUI, helper and CLI together; do not reset history as a routine update step.
 
 ## What it monitors
 
@@ -52,9 +52,9 @@ CODE_SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" \
 open "$HOME/Applications/DailyDisk.app"
 ```
 
-The identity above is a placeholder, not a certificate supplied by this repository. See **[the complete GitHub source installation guide](Docs/Installation.md)** for cloning, toolchain checks, local self-signed identities, signing options, permissions, updates, and troubleshooting. Full Xcode is optional for the tested command-line build. A paid developer membership is not needed merely to compile or run the ad-hoc trial.
+The identity above is a placeholder, not a certificate supplied by this repository. See **[the complete GitHub source installation guide](Docs/Installation.md)** for cloning, toolchain checks, local self-signed identities, signing options, permissions, updates, and troubleshooting. Full Xcode is optional with compatible Command Line Tools. A paid developer membership is not needed merely to compile or run the ad-hoc trial.
 
-This is a source distribution with host-architecture builds, not a notarized download-and-open installer. Apple Silicon has local end-to-end validation; Intel and fresh-Mac installation are not yet fully validated. There is no automatic updater or universal-binary release pipeline.
+This is a source distribution with host-architecture builds, not a notarized download-and-open installer. Intel and fresh-Mac installation are not yet fully validated. There is no automatic updater or universal-binary release pipeline.
 
 ## First-time setup
 
@@ -71,13 +71,13 @@ The overview presents the latest disk delta and more specific growth sources fro
 
 The source implements **one automatic full scan per local day at 05:00**. If a successful full scan already completed that day, automatic work is skipped. A manual **立即检查** performs full scanning when today's full scan is missing; subsequent manual requests try incremental scanning and fall back to full if trusted event history is unavailable. An in-progress scan is reused. Failed/cancelled work does not count as successful completion. Explicit full rechecks remain available.
 
-The [daily-full design](Docs/DailyFullScan.md) separates source tests from installed acceptance. Update the GUI, helper and registered LaunchAgent together; an older installed copy retains its previous schedule. No history reset is needed. Daily success uses the full inventory’s actual post-commit completion date and requires a published report. Delayed publication cannot turn yesterday’s inventory into today’s full check. Historical schema-6 completion times are approximated from their stored finish times.
+The [daily-full design](Docs/DailyFullScan.md) separates source tests from installed acceptance. Update the GUI, helper and registered LaunchAgent together; an older installed copy retains its previous schedule. No history reset is needed. Daily success uses the full inventory’s actual post-commit completion date and requires a published report. Delayed publication cannot turn yesterday’s inventory into today’s full check.
 
 The first full scan remains an opening balance. The daily full path compares successive inventories and uses FSEvents only to catch changes during traversal; it must not depend on yesterday's journal surviving. The helper exits after work. A powered-off/logged-out Mac cannot execute its user task; catch-up depends on an eligible login/wake invocation, not a guaranteed wake-up feature.
 
 ## Performance and storage
 
-Scan duration depends on file count, change volume, permissions, storage speed and concurrent activity. Full scanning reads metadata; W6 reduces inventory writes by persisting changes. Runtime data for a multi-million-file inventory can occupy several GB, with free pages reused between scans. Database size is not cumulative writes or SSD wear. See [the design](Docs/DailyFullScan.md) and [reproducible tests](Docs/Testing.md).
+Scan duration depends on file count, change volume, permissions, storage speed and concurrent activity. Full scanning reads metadata; daily inventory reuse reduces inventory writes by persisting changes. Runtime data for a multi-million-file inventory can occupy several GB, with free pages reused between scans. Database size is not cumulative writes or SSD wear. See [the design](Docs/DailyFullScan.md) and [reproducible tests](Docs/Testing.md).
 
 ## Reports
 
@@ -196,9 +196,10 @@ Overview and report details list up to five non-overlapping growth entries and u
 
 全量检查完成文件遍历后，如有无法读取的目录，会显示“正在保留无法读取目录的历史记录”，并展示处理数量；这一步可取消，之前的报告和基线会保留。事件日志身份改变时会自动进行全量恢复，因此并非每次例行检查都能使用增量扫描。
 
-
 ### 回收 DailyDisk 自身占用
 
 在 **设置 → 诊断 → 数据占用** 查看当前占用、数据库可复用空间和上次维护结果，选择 **回收数据库空间** 让后台 helper 整理数据库。当前基线和历史报告会保留；需要每日任务已安装并获批准，也需要足够的临时空间。维护开始后不可取消，可以关闭窗口等待完成。
 
 旧库存有 24 小时恢复窗口，后续后台运行时清理。自动压缩有空间阈值和七天冷却期，不会每天无条件执行。全量扫描仍需要临时空间；详情见 [运行维护](Docs/Operations.md#reclaiming-dailydisk-data-space)。升级后请重新打开 GUI，使其与 helper 使用同一版本。
+
+Before updating an existing installation, finish scans, remove the daily task in Settings, quit the GUI and close CLI inspections. Rebuild with the original signing identity, then reopen the app and enable the daily task again. The installer validates signatures, refuses active/registered workers and restores the previous app on replacement failure. See Docs/Installation.md for interruption recovery and database rollback limits.

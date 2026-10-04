@@ -2,7 +2,7 @@
 
 ## Validation scope
 
-Use [Installation](Installation.md) to provision a source-build machine. Minimum declared support is macOS 15/Swift 6; local runtime validation used Apple Silicon with Command Line Tools Swift 6.3.2. CI is configured on `macos-15` but does not validate FDA, notification grants, Intel hardware, or another user's fresh installation. History-page visual acceptance remains an open gate. Do not turn local observations into cross-machine performance guarantees.
+Use [Installation](Installation.md) to provision a source-build machine. Minimum declared support is macOS 15/Swift 6. CI is configured on `macos-15` but does not validate FDA, notification grants, Intel hardware, or another user's fresh installation. History-page visual acceptance remains an open gate. Do not turn local observations into cross-machine performance guarantees.
 
 ## Automated PR suite
 
@@ -105,9 +105,9 @@ On an internal APFS Mac:
 - The first screen displays setup failures and progress above results; one primary action guides setup/check/retry.
 - Verify the installed signed app with real baseline, file growth, removal and GUI reopen checks. Never commit the real report or inventory.
 
-### Generation cleanup (schema 4)
+### Generation cleanup
 
-Migration 003 adds a composite path/object lookup index. Migration 004 adds a generation-delete trigger that removes canonical rows and paths in sets before removing objects. SQLite can otherwise prefer a generation-only lookup even when a more selective index exists; deleting a large failed/staging generation then repeatedly scans its entire path set. The trigger keeps foreign keys and transaction rollback intact, including protection of the active checkpoint. Regression coverage upgrades a v2 schema and cancels a 10,000-record staging generation while preserving the active baseline.
+A composite path/object lookup index and a generation-delete trigger remove canonical rows and paths in sets before removing objects. SQLite can otherwise prefer a generation-only lookup even when a more selective index exists; deleting a large failed/staging generation then repeatedly scans its entire path set. The trigger keeps foreign keys and transaction rollback intact, including protection of the active checkpoint. Regression coverage tests migration and cancels a 10,000-record staging generation while preserving the active baseline.
 
 Overview refresh uses lightweight WAL-aware read-only queries. Complete database verification and table-size diagnostics run only via **设置 → 诊断 → 验证数据库** (or the strict CLI); opening the app must not trigger a full integrity scan or prevent recovery of a nonempty WAL. An unverified overview is never labeled healthy.
 
@@ -115,7 +115,7 @@ FSEvents callbacks are accepted as whole batches under one mailbox lock. Histori
 
 Observed inode reuse may proceed only when the run overlay contains no surviving paths for the old identity; surviving aliases still force recovery. Subtree paging uses explicit lower/upper path bounds plus an exact descendant predicate so SQLite seeks into the path index rather than rescanning an entire generation for every changed directory. Tests retain adjacent names such as `cache-neighbor`, `cache.more`, and `cache0`.
 
-Before full-generation orphan cleanup, the writer refreshes inventory-path statistics with `ANALYZE inventory_paths` and a 1,000-row-per-index analysis limit. Without statistics, SQLite can choose a generation-only scan for foreign-key cascades despite the composite identity index. A populated synthetic regression verifies identity-bounded child lookups. Statistics are SQLite-managed metadata; the application schema remains version 4.
+Before full-generation orphan cleanup, the writer refreshes inventory-path statistics with `ANALYZE inventory_paths` and a 1,000-row-per-index analysis limit. Without statistics, SQLite can choose a generation-only scan for foreign-key cascades despite the composite identity index. A populated synthetic regression verifies identity-bounded child lookups. Statistics are SQLite-managed metadata.
 
 On restart, a persisted committing phase with a still-running SQLite scan is treated as an interrupted transaction, not committed-report recovery. The helper publishes non-cancellable failure cleanup, removes abandoned staging, and only then resumes inventory work for that request. Progress counters remain cumulative across recovery attempts. Ordinary cancellation remains forbidden during commit; cleanup is entered only after rollback or after the new helper owns the writer lease.
 
@@ -129,13 +129,13 @@ Incremental orphan cleanup reuses full-scan path statistics. It does not rerun A
 
 ### Overlay paging performance regression
 
-Regular coverage includes multi-page base/overlay merging with dense deletions, replacements, additions, overlapping roots and adjacent path names; cancellation between preservation batches; and persisted progress with fractional timestamps and legacy counter decoding. The opt-in million-row test now also copies the surviving inventory through opaque preservation and performs a full zero-difference comparison. Local measurements were 12.4 seconds for approximately one million preserved records and 10.8 seconds for the full diff, with the active checkpoint unchanged. These are synthetic measurements, not a promise of whole-disk scan duration. Test budgets are 120 seconds and 60 seconds respectively.
+Regular coverage includes multi-page base/overlay merging with dense deletions, replacements, additions, overlapping roots and adjacent path names; cancellation between preservation batches; and persisted progress with fractional timestamps and legacy counter decoding. The opt-in million-row test now also copies the surviving inventory through opaque preservation and performs a full zero-difference comparison. Test budgets are 120 seconds and 60 seconds respectively.
 
 Installed recovery validation after the paging repair completed successfully across approximately 2.4 million visited paths in 32 minutes 16 seconds. The 214 opaque roots were processed in approximately one second (no historical paths needed copying). The remaining major full-scan costs were traversal, canonical/index preparation and atomic persistence; the fix does not make full recovery instantaneous. Reports were published and the helper exited normally. Post-run inspection found no active runs, an empty WAL, and a checkpoint journal UUID matching the current device. The pre-run full integrity/foreign-key/invariant/report verification was healthy. Regular coverage passed all 208 enabled tests, the million-row stress test passed separately, and GitHub CI passed. Final synthetic preservation/diff timings were 13.6/9.8 seconds.
 
 ## Space maintenance regression gates
 
-Schema 5 tests reconstruct the published v4 schema, migrate at a fractional timestamp and preserve the active checkpoint while granting old retired inventory a fresh recovery window. Synthetic fixtures cover expiry boundaries, pending reports, running scans, rollback of cascaded cleanup, long paths, non-UTF-8 hard-link aliases, space preflight failure, writer contention, and report/checkpoint preservation through real VACUUM. A subprocess test kills `/usr/bin/sqlite3` during VACUUM WAL writes and verifies reopened inventory/report integrity; it uses only a temporary synthetic database.
+Migration tests preserve checkpoints and exercise retention timestamps at fractional precision. Synthetic fixtures cover expiry boundaries, pending reports, running scans, rollback of cascaded cleanup, long paths, non-UTF-8 hard-link aliases, space preflight failure, writer contention, and report/checkpoint preservation through real VACUUM. A subprocess test kills `/usr/bin/sqlite3` during VACUUM WAL writes and verifies reopened inventory/report integrity; it uses only a temporary synthetic database.
 
 Platform/App coverage exercises the distinct `reclaimSpace` request, persisted fractional-time progress, cancellation closure, GUI reconnect, zero-domain `maintenanceCompleted`, explicit insufficient-space errors, and interrupted manual maintenance without automatic re-compression. Normal overview polling still does not run storage analysis or full verification.
 
@@ -153,9 +153,9 @@ This opt-in test complements the existing `millionRecordInventory` end-to-end st
 
 Ordinary tests cover raw non-UTF-8 aliases, signed inode boundaries, canonical path selection independent of insertion order, generation/classification isolation, adjacent directory names, multi-page seeks, checkpoint-protected deletion rollback, and overlay/parent references during dictionary GC. A 4,096-row sparse-generation regression proves that an indexed dictionary range query can do over 100 times the work of generation-local paging despite the same LIMIT. This negative test is intentional: it prevents an unsafe layout from being approved solely on size or a superficial EXPLAIN plan.
 
-Only hot inventory tables and simplified catalogs are compared; full production overlays, history, scanner traversal and migration are not benchmarked by this fixture. UUID layout catalogs also carry explicit external-ID mapping columns for a uniform harness, so these totals are not an exact whole-schema-5 database measurement. Timings use a fixed layout order on one machine, not repeated cold-cache trials. All input is synthetic, temporary databases are removed, and no installed database is read or modified.
+Only hot inventory tables and simplified catalogs are compared; full production overlays, history, scanner traversal and migration are not benchmarked by this fixture. UUID layout catalogs also carry explicit external-ID mapping columns for a uniform harness, so these totals are not a complete production database measurement. Timings use a fixed layout order on one machine, not repeated cold-cache trials. All input is synthetic, temporary databases are removed, and no installed database is read or modified.
 
-## W6 regression gates
+## Inventory reuse regression gates
 
 Coverage added:
 
@@ -165,13 +165,13 @@ Coverage added:
 - Aliases observed in opposite metadata states across batches of 1 and 1,024 retain last-observation semantics; opaque roots preserve history and exclude adjacent names.
 - Mixed churn (delete, rename, resize, hard links, raw non-UTF-8 path) matches fresh-generation inventory and signed semantic ledger; retained records reconstruct the original inventory. Cross-classification transfer has a balanced debit/credit pair.
 - Version reconstruction survives deletion/replacement and backwards timestamps; unpublished history pins retention, only contiguous published prefixes expire, referenced retired generations remain protected.
-- Populated schema 7 migrates to 8 without replacing inventory/checkpoint/report payload.
+- Supported database upgrades preserve inventory, checkpoints and historical report payloads.
 - Real Control progress, daily E0–E1 event replay/loss/recovery, cancellation, report recovery, FULL WAL crash/pinned-reader tests continue in the normal suite. The new comparingInventory phase is cancellable and cannot jump directly to commit.
 
 Reproduction (run separately; process I/O benchmarks must not overlap):
 
 ```bash
-# 100k production W6; omit DAILYDISK_WRITE_REUSE for full-generation control.
+# 100k production daily inventory reuse; omit DAILYDISK_WRITE_REUSE for full-generation control.
 DAILYDISK_DAILY_WRITE_TEST=1 DAILYDISK_WRITE_WAL=bounded \
   DAILYDISK_WRITE_BATCH=1024 DAILYDISK_WRITE_REUSE=1 \
   DAILYDISK_WRITE_CHANGED_PERCENT=3 swift test --filter dailyFullWriteBudget
@@ -180,9 +180,14 @@ DAILYDISK_DAILY_WRITE_TEST=1 DAILYDISK_WRITE_WAL=bounded \
 # add DAILYDISK_WRITE_ROWS=1000000 for the million-row low-change workload.
 DAILYDISK_RUN_STRESS=1 swift test --filter millionRecordInventory
 
-# Earlier independent storage prototype; not the production result.
-DAILYDISK_W6_STRESS=1 swift test --filter w6WriteMeasurement
 ```
 
-
 Production write comparisons must use matched inputs and run separately. Process counters exclude physical NAND write amplification; fixtures do not measure full-disk traversal. Keep benchmark results and local acceptance transcripts outside version control. Signed-app permissions, fresh-machine installation and natural scheduled cleanup require separate acceptance; a passing synthetic suite does not establish them.
+
+## Installer safety
+
+Run `Scripts/test-install-app.sh` for synthetic fresh-install, replacement, busy-process, registered-job, inspection-failure, signature-mismatch, concurrent-install and rename-failure rollback checks. The fixtures mock platform tools and never modify a real app or job. Signed installation and permissions still require manual acceptance.
+
+## Update preparation and versions
+
+Run `Scripts/test-version-config.sh` and `Scripts/test-install-app.sh` alongside the standard suite. Update tests use synthetic Control roots and task managers: helper admission races, queued-request preservation, restart, partial unregister, failed restore, disabled preferences, approval and installer-lock exclusion. Malformed fields, linked files and file permissions must remain fail-closed. Metadata checks compare CLI with the shared resource; packaged CLI build-number must match Info.plist even when BUILD_NUMBER overrides the development default. These tests do not establish Sparkle installation, notarization, Gatekeeper or real SMAppService upgrade acceptance.
