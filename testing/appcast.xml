@@ -1,9 +1,15 @@
-<?xml version="1.0" encoding="utf-8"?>
-<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
-  <channel>
-    <title>DailyDisk Testing Updates</title>
-    <link>https://nu1sance.github.io/DailyDisk/testing/appcast.xml</link>
-    <description>DailyDisk testing update feed. No updates published yet.</description>
-    <language>en</language>
-  </channel>
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>DailyDisk</title>
+        <item>
+            <title>0.1.0</title>
+            <pubDate>Mon, 05 Oct 2026 01:09:28 +0800</pubDate>
+            <sparkle:version>12</sparkle:version>
+            <sparkle:shortVersionString>0.1.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/Nu1sance/DailyDisk-Releases/releases/download/v0.1.0-build12/DailyDisk-0.1.0-build12-arm64.zip" length="7098480" type="application/octet-stream" sparkle:edSignature="kig6JDcuXl3X8b50hYAn8Fvr/78+8Wumq+c5wMwh9TVtAdLBB+BUefiYiZ9iumNCMSltUfAaYoHYS52IwXMbDA=="/>
+        </item>
+    </channel>
 </rss>
