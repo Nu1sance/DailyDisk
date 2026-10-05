@@ -2,13 +2,31 @@ import Darwin
 import Foundation
 
 public struct UpdatePreparation: Codable, Equatable, Sendable {
-    public enum Phase: String, Codable, Sendable { case preparing, ready, restoring, sparkleInstalling }
-    public let version: Int
+    public enum Phase: String, Codable, Sendable {
+        case preparing, ready, restoring, sparkleInstalling
+        case externalInstalling, externalRecoveryRequired
+    }
+    public internal(set) var version: Int
     public let id: UUID
     public let restoreDailyTask: Bool
     public var phase: Phase
     public var sourceBuild: String?
     public var targetBuild: String?
+    public internal(set) var externalOperation: ExternalInstallationOperation?
+
+    public var requiresExternalInstallationResolution: Bool {
+        phase == .externalInstalling || phase == .externalRecoveryRequired
+    }
+
+    func validate() throws {
+        if requiresExternalInstallationResolution {
+            guard version == 2, let externalOperation else { throw UpdatePreparationError.invalidState }
+            _ = try ExternalInstallationIntent(
+                operation: externalOperation, sourceBuild: sourceBuild, targetBuild: targetBuild)
+        } else {
+            guard version == 1, externalOperation == nil else { throw UpdatePreparationError.invalidState }
+        }
+    }
 
     init(restoreDailyTask: Bool) {
         version = 1
@@ -24,6 +42,7 @@ public enum UpdatePreparationError: Error, Equatable {
     case unsupportedRegistration
     case invalidState
     case otherUserSession
+    case externalInstallationUnresolved
 }
 
 /// Separate open file descriptions make flock effective across actors and processes.
@@ -83,6 +102,7 @@ extension UpdatePreparationError: LocalizedError {
         case .installationInProgress: "已有安装正在进行，或旧安装锁尚待检查。请完成该安装后重试。"
         case .unsupportedRegistration: "请先在系统设置中完成每日任务批准，再重试更新。"
         case .invalidState: "更新状态与目标版本不匹配，请完成已开始的更新。"
+        case .externalInstallationUnresolved: "外部安装尚未确认结束，扫描与任务恢复保持暂停。请勿删除更新状态文件。"
         case .otherUserSession: "请先退出其他用户的登录会话，再更新 DailyDisk。"
         }
     }

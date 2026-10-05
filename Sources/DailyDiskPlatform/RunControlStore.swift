@@ -78,12 +78,12 @@ public actor RunControlStore: ScanProgressReporting, ScanCancellationChecking, S
     }
 
     private static let updateKeys: Set<String> = [
-        "version", "id", "restoreDailyTask", "phase", "sourceBuild", "targetBuild",
+        "version", "id", "restoreDailyTask", "phase", "sourceBuild", "targetBuild", "externalOperation",
     ]
 
     private func readUpdate() throws -> UpdatePreparation? {
         let state = try readIfPresent(UpdatePreparation.self, from: .update, allowedKeys: Self.updateKeys)
-        guard state == nil || state?.version == 1 else { throw UpdatePreparationError.invalidState }
+        try state?.validate()
         return state
     }
 
@@ -158,10 +158,47 @@ public actor RunControlStore: ScanProgressReporting, ScanCancellationChecking, S
         }
     }
 
+    /// Internal until the complete Homebrew transaction adapter is validated.
+    /// The coordinator holds the installation lease; the work lease and Control
+    /// lock close admission races before publishing the durable protocol-v2 gate.
+    func armExternalInstallation(id: UUID, intent: ExternalInstallationIntent) throws {
+        try withLock {
+            try validateRoot()
+            guard var state = try readUpdate(), state.id == id, state.phase == .ready else {
+                throw UpdatePreparationError.invalidState
+            }
+            let work = try UpdateWorkLease(url: rootURL.appendingPathComponent(".update-work.lock"), exclusive: true)
+            defer { withExtendedLifetime(work) {} }
+            guard !fileExists(.active), !fileExists(.pending) else { throw UpdatePreparationError.busy }
+            state.version = 2
+            state.phase = .externalInstalling
+            state.externalOperation = intent.operation
+            state.sourceBuild = intent.sourceBuild
+            state.targetBuild = intent.targetBuild
+            try state.validate()
+            try write(state, to: .update, allowedKeys: Self.updateKeys)
+        }
+    }
+
+    /// Recording failure never means the replacing process or its children ended.
+    func markExternalInstallationInterrupted(id: UUID) throws {
+        try withLock {
+            try validateRoot()
+            guard var state = try readUpdate(), state.id == id, state.requiresExternalInstallationResolution else {
+                throw UpdatePreparationError.invalidState
+            }
+            state.phase = .externalRecoveryRequired
+            try write(state, to: .update, allowedKeys: Self.updateKeys)
+        }
+    }
+
     public func setUpdatePhase(id: UUID, phase: UpdatePreparation.Phase) throws {
         try withLock {
             try validateRoot()
             guard var state = try readUpdate(), state.id == id else { throw UpdatePreparationError.invalidState }
+            guard !state.requiresExternalInstallationResolution else {
+                throw UpdatePreparationError.externalInstallationUnresolved
+            }
             guard phase == .restoring || (state.phase == .preparing && phase == .ready) else {
                 throw UpdatePreparationError.invalidState
             }

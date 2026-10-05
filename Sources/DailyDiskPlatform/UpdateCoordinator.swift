@@ -70,6 +70,9 @@ public actor UpdateCoordinator {
         guard let source = Int(currentBuild), let target = Int(targetBuild),
             source > 0, target > source, target <= 999_999_999, String(target) == targetBuild
         else { throw UpdatePreparationError.invalidState }
+        if try await control.updatePreparation()?.requiresExternalInstallationResolution == true {
+            throw UpdatePreparationError.externalInstallationUnresolved
+        }
         if let state = try await control.updatePreparation(), state.phase == .sparkleInstalling {
             guard state.sourceBuild == currentBuild, state.targetBuild == targetBuild else {
                 throw UpdatePreparationError.invalidState
@@ -91,6 +94,28 @@ public actor UpdateCoordinator {
         return state.id
     }
 
+    /// First-stage admission for a future native Cask adapter. Deliberately not
+    /// exposed as a command until success, rollback and orphan-child fences exist.
+    func beginExternalInstallation(intent: ExternalInstallationIntent) async throws -> UUID {
+        guard !operating else { throw UpdatePreparationError.busy }
+        operating = true
+        defer { operating = false }
+        try checkSessions()
+        let installation = try await control.acquireInstallationLease(installationDirectory: installationDirectory)
+        defer { installation.release() }
+        guard !writerIsActive(), try await !manager.runtimeStatus().isRunning else {
+            throw UpdatePreparationError.busy
+        }
+        guard await manager.status() == .notRegistered else {
+            throw UpdatePreparationError.unsupportedRegistration
+        }
+        guard let state = try await control.updatePreparation(), state.phase == .ready else {
+            throw UpdatePreparationError.invalidState
+        }
+        try await control.armExternalInstallation(id: state.id, intent: intent)
+        return state.id
+    }
+
     public func cancelSparkleDownload(id: UUID) async throws {
         guard !operating else { throw UpdatePreparationError.busy }
         try await control.cancelSparkleDownload(id: id)
@@ -107,6 +132,9 @@ public actor UpdateCoordinator {
         let installation = try await control.acquireInstallationLease(installationDirectory: installationDirectory)
         defer { installation.release() }
         guard let state = try await control.updatePreparation() else { return }
+        guard !state.requiresExternalInstallationResolution else {
+            throw UpdatePreparationError.externalInstallationUnresolved
+        }
         if state.phase == .sparkleInstalling {
             guard state.targetBuild == currentBuild, state.sourceBuild != currentBuild else {
                 throw UpdatePreparationError.installationInProgress

@@ -13,13 +13,11 @@ struct SettingsView: View {
                 SoftwareUpdateSettings(updater: controller.softwareUpdater)
                 LabeledContent("版本", value: "\(DailyDiskProduct.version) (\(DailyDiskProduct.installedBuildNumber))")
                 if controller.updatePreparation != nil {
-                    Text(
-                        controller.updatePreparation?.phase == .sparkleInstalling
-                            ? "正在更新，扫描已暂停；新版本启动后会恢复原有每日任务。若安装中断，请重新检查更新并完成安装。"
-                            : "已进入更新准备，新的扫描已暂停。手动安装完成或放弃安装后，请恢复运行。")
+                    Text(updatePreparationMessage)
                     Button("恢复运行") { Task { await controller.restoreAfterUpdate() } }
                         .disabled(
                             controller.isPreparingUpdate
+                                || controller.updatePreparation?.requiresExternalInstallationResolution == true
                                 || (controller.updatePreparation?.phase == .sparkleInstalling
                                     && controller.updatePreparation?.targetBuild
                                         != DailyDiskProduct.installedBuildNumber)
@@ -139,6 +137,19 @@ struct SettingsView: View {
             Button("取消", role: .cancel) {}
         } message: {
             Text("重置后，下一次扫描会重新建立完整基线。完全磁盘访问和通知授权不会自动撤销。")
+        }
+    }
+
+    private var updatePreparationMessage: String {
+        switch controller.updatePreparation?.phase {
+        case .externalInstalling:
+            "外部安装尚未确认结束，扫描与任务恢复保持暂停。关闭或重新打开应用不会解除保护。"
+        case .externalRecoveryRequired:
+            "外部安装需要恢复检查。扫描仍保持暂停，请勿删除更新状态文件或强行恢复每日任务。"
+        case .sparkleInstalling:
+            "正在更新，扫描已暂停；新版本启动后会恢复原有每日任务。若安装中断，请重新检查更新并完成安装。"
+        default:
+            "已进入更新准备，新的扫描已暂停。手动安装完成或放弃安装后，请恢复运行。"
         }
     }
 

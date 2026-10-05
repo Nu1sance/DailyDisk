@@ -74,6 +74,14 @@ for failure in 'PROCESS_RESULT=0' 'PROCESS_RESULT=2' 'OTHER_SESSION=1' 'JOB_RESU
     [[ "$(cat "$FIXTURE/target/DailyDisk.app/marker")" == old ]]
     [[ ! -e "$FIXTURE/target/.DailyDisk-install.lock" ]]
 done
+# A durable external gate still excludes source replacement after its callback exits.
+for phase in externalInstalling externalRecoveryRequired sparkleInstalling; do
+    printf '{"version":2,"phase":"%s"}\n' "$phase" > "$FIXTURE/Control/update-preparation.json"
+    chmod 600 "$FIXTURE/Control/update-preparation.json"
+    if install_fixture; then echo "Accepted protected state: $phase" >&2; exit 1; fi
+    [[ "$(cat "$FIXTURE/target/DailyDisk.app/marker")" == old ]]
+done
+rm "$FIXTURE/Control/update-preparation.json"
 mkdir "$FIXTURE/target/.DailyDisk-install.lock"
 if install_fixture; then exit 1; fi
 rmdir "$FIXTURE/target/.DailyDisk-install.lock"

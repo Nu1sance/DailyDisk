@@ -313,3 +313,207 @@ func explicitInstallationLeaseRelease() async throws {
     previous.release()
     withExtendedLifetime((previous, next)) {}
 }
+
+@Test(
+    "External installation survives callback exit and app restart without releasing scan or restore gates",
+    arguments: [true, false])
+func externalInstallationDurability(enabled: Bool) async throws {
+    let root = try updateRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let location = root.appendingPathComponent("Control")
+    let store = try RunControlStore(rootURL: location)
+    let manager = UpdateTaskFixture(enabled ? .enabled : .notRegistered)
+    let coordinator = UpdateCoordinator(
+        control: store, manager: manager, installationDirectory: root,
+        currentBuild: "16", checkSessions: {}, writerIsActive: { false })
+    try await coordinator.prepare()
+    let intent = try ExternalInstallationIntent(operation: .upgrade, sourceBuild: "16", targetBuild: "17")
+    let id = try await coordinator.beginExternalInstallation(intent: intent)
+    // The callback's installation lease ended, but the durable gate must remain.
+    let callbackEnded = try await store.acquireInstallationLease(installationDirectory: root)
+    callbackEnded.release()
+    let restarted = try RunControlStore(rootURL: location)
+    let state = try #require(try await restarted.updatePreparation())
+    #expect(state.version == 2)
+    #expect(state.id == id && state.externalOperation == .upgrade)
+    #expect(state.sourceBuild == "16" && state.targetBuild == "17")
+    #expect(state.restoreDailyTask == enabled)
+    #expect(try await restarted.acquireHelperUpdateLease() == nil)
+    let request = try DailyDiskRunRequest(createdAt: Date())
+    await #expect(throws: RunControlStoreError.updateInProgress) { try await restarted.enqueue(request) }
+    await #expect(throws: RunControlStoreError.updateInProgress) { try await restarted.beginScheduledRun(request) }
+    await #expect(throws: RunControlStoreError.updateInProgress) { _ = try await restarted.claimPendingRequest() }
+    // Merely launching the target build is not evidence that brew/rollback ended.
+    let newApp = UpdateCoordinator(
+        control: restarted, manager: manager, installationDirectory: root,
+        currentBuild: "17", checkSessions: {}, writerIsActive: { false })
+    await #expect(throws: UpdatePreparationError.externalInstallationUnresolved) { try await newApp.restore() }
+    await #expect(throws: UpdatePreparationError.externalInstallationUnresolved) {
+        try await restarted.setUpdatePhase(id: id, phase: .restoring)
+    }
+    await #expect(throws: UpdatePreparationError.invalidState) {
+        try await restarted.finishUpdateRestoration(id: id)
+    }
+    await #expect(throws: UpdatePreparationError.externalInstallationUnresolved) {
+        _ = try await newApp.prepareSparkleInstallation(targetBuild: "18")
+    }
+    await #expect(throws: UpdatePreparationError.invalidState) {
+        try await restarted.cancelSparkleDownload(id: id)
+    }
+    #expect(await manager.registrations == 0)
+    #expect(await manager.status() == .notRegistered)
+    let file = location.appendingPathComponent("update-preparation.json")
+    let attrs = try FileManager.default.attributesOfItem(atPath: file.path)
+    #expect((attrs[.posixPermissions] as? NSNumber)?.intValue == 0o600)
+}
+
+@Test("External failure retains a path-free recovery gate and rejects stale callbacks")
+func externalInstallationFailure() async throws {
+    let root = try updateRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = try RunControlStore(rootURL: root.appendingPathComponent("Control"))
+    let manager = UpdateTaskFixture()
+    let coordinator = UpdateCoordinator(
+        control: store, manager: manager, installationDirectory: root, checkSessions: {}, writerIsActive: { false })
+    try await coordinator.prepare()
+    let id = try await coordinator.beginExternalInstallation(
+        intent: ExternalInstallationIntent(operation: .uninstall, sourceBuild: "16", targetBuild: nil))
+    await #expect(throws: UpdatePreparationError.invalidState) {
+        try await store.markExternalInstallationInterrupted(id: UUID())
+    }
+    try await store.markExternalInstallationInterrupted(id: id)
+    try await store.markExternalInstallationInterrupted(id: id)
+    #expect(try await store.updatePreparation()?.phase == .externalRecoveryRequired)
+    await #expect(throws: UpdatePreparationError.externalInstallationUnresolved) { try await coordinator.restore() }
+    await #expect(throws: RunControlStoreError.updateInProgress) { try await store.requireUpdatesInactive() }
+    await #expect(throws: UpdatePreparationError.invalidState) {
+        _ = try await coordinator.beginExternalInstallation(
+            intent: ExternalInstallationIntent(operation: .reinstall, sourceBuild: "16", targetBuild: "16"))
+    }
+}
+
+@Test("External intent rejects downgrade and malformed build metadata before mutation")
+func externalIntentValidation() throws {
+    let valid: [(ExternalInstallationOperation, String?, String?)] = [
+        (.install, nil, "17"), (.upgrade, "16", "17"), (.reinstall, "17", "17"),
+        (.reinstall, "16", "17"), (.uninstall, "16", nil),
+    ]
+    for (operation, source, target) in valid {
+        _ = try ExternalInstallationIntent(operation: operation, sourceBuild: source, targetBuild: target)
+    }
+    let invalid: [(ExternalInstallationOperation, String?, String?)] = [
+        (.install, "16", "17"), (.install, nil, "017"), (.upgrade, "17", "16"),
+        (.upgrade, "17", "17"), (.upgrade, nil, "17"), (.reinstall, "17", "16"),
+        (.uninstall, "16", "17"), (.uninstall, "0", nil), (.install, nil, "1000000000"),
+        (.install, nil, "/untrusted"), (.install, nil, "-1"),
+    ]
+    for (operation, source, target) in invalid {
+        #expect(throws: UpdatePreparationError.invalidState) {
+            try ExternalInstallationIntent(operation: operation, sourceBuild: source, targetBuild: target)
+        }
+    }
+}
+
+@Test("External admission requires explicit readiness and rejects live registration and writer work")
+func externalAdmissionPreconditions() async throws {
+    let root = try updateRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = try RunControlStore(rootURL: root.appendingPathComponent("Control"))
+    let manager = UpdateTaskFixture(.notRegistered)
+    let intent = try ExternalInstallationIntent(operation: .upgrade, sourceBuild: "16", targetBuild: "17")
+    let coordinator = UpdateCoordinator(
+        control: store, manager: manager, installationDirectory: root, checkSessions: {}, writerIsActive: { false })
+    await #expect(throws: UpdatePreparationError.invalidState) {
+        _ = try await coordinator.beginExternalInstallation(intent: intent)
+    }
+    #expect(try await store.updatePreparation() == nil)
+    try await coordinator.prepare()
+    try await manager.register()
+    await #expect(throws: UpdatePreparationError.unsupportedRegistration) {
+        _ = try await coordinator.beginExternalInstallation(intent: intent)
+    }
+    try await manager.unregister()
+    let busy = UpdateCoordinator(
+        control: store, manager: manager, installationDirectory: root, checkSessions: {}, writerIsActive: { true })
+    await #expect(throws: UpdatePreparationError.busy) {
+        _ = try await busy.beginExternalInstallation(intent: intent)
+    }
+    #expect(try await store.updatePreparation()?.phase == .ready)
+    let lease = try await store.acquireInstallationLease(installationDirectory: root)
+    await #expect(throws: UpdatePreparationError.installationInProgress) {
+        _ = try await coordinator.beginExternalInstallation(intent: intent)
+    }
+    lease.release()
+    try await coordinator.restore()
+    #expect(try await store.updatePreparation() == nil)
+}
+
+@Test("Malformed external records cannot fall back to ordinary manual restoration")
+func externalStateValidation() async throws {
+    let root = try updateRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let location = root.appendingPathComponent("Control")
+    let store = try RunControlStore(rootURL: location)
+    let state = try await store.beginUpdatePreparation(restoreDailyTask: false)
+    try await store.setUpdatePhase(id: state.id, phase: .ready)
+    try await store.armExternalInstallation(
+        id: state.id, intent: ExternalInstallationIntent(operation: .upgrade, sourceBuild: "16", targetBuild: "17"))
+    let file = location.appendingPathComponent("update-preparation.json")
+    let data = try Data(contentsOf: file)
+    let original = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    for (key, value) in [("version", 1 as Any), ("phase", "ready" as Any), ("targetBuild", "15" as Any)] {
+        var malformed = original
+        malformed[key] = value
+        try JSONSerialization.data(withJSONObject: malformed).write(to: file)
+        await #expect(throws: UpdatePreparationError.invalidState) { _ = try await store.acquireHelperUpdateLease() }
+    }
+    try data.write(to: file)
+    #expect(try await store.updatePreparation()?.phase == .externalInstalling)
+}
+
+@Test("External admission racing GUI Resume cannot publish a gate after task restoration")
+func externalAdmissionRestoreRace() async throws {
+    enum Result: Sendable { case armed, restored, refused }
+    let root = try updateRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    for iteration in 0..<24 {
+        let location = root.appendingPathComponent("Control-\(iteration)")
+        let store = try RunControlStore(rootURL: location)
+        let otherStore = try RunControlStore(rootURL: location)
+        let manager = UpdateTaskFixture()
+        let admission = UpdateCoordinator(
+            control: store, manager: manager, installationDirectory: root, checkSessions: {}, writerIsActive: { false })
+        let restoration = UpdateCoordinator(
+            control: otherStore, manager: manager, installationDirectory: root, checkSessions: {},
+            writerIsActive: { false })
+        try await admission.prepare()
+        let intent = try ExternalInstallationIntent(operation: .upgrade, sourceBuild: "16", targetBuild: "17")
+        let results = try await withThrowingTaskGroup(of: Result.self) { group in
+            group.addTask {
+                do {
+                    _ = try await admission.beginExternalInstallation(intent: intent)
+                    return .armed
+                } catch is UpdatePreparationError { return .refused }
+            }
+            group.addTask {
+                do {
+                    try await restoration.restore()
+                    return .restored
+                } catch is UpdatePreparationError { return .refused }
+            }
+            var results: [Result] = []
+            for try await result in group { results.append(result) }
+            return results
+        }
+        let armed = results.contains { if case .armed = $0 { true } else { false } }
+        let restored = results.contains { if case .restored = $0 { true } else { false } }
+        #expect(armed != restored)
+        if armed {
+            #expect(await manager.registrations == 0)
+            #expect(try await otherStore.updatePreparation()?.phase == .externalInstalling)
+        } else {
+            #expect(await manager.registrations == 1)
+            #expect(try await otherStore.updatePreparation() == nil)
+        }
+    }
+}

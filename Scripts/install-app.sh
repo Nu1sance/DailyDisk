@@ -81,7 +81,7 @@ require_idle() {
         phase="$(/usr/bin/plutil -extract phase raw "$marker")" || exit 1
         case "$phase" in
             preparing|ready|restoring) ;;
-            *) echo 'error: finish the pending Sparkle update before source installation' >&2; exit 1 ;;
+            *) echo 'error: resolve the pending external or Sparkle installation before source installation' >&2; exit 1 ;;
         esac
     fi
     for name in DailyDisk DailyDiskAgent dailydiskctl; do
