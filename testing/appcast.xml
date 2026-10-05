@@ -3,13 +3,13 @@
     <channel>
         <title>DailyDisk</title>
         <item>
-            <title>0.2.0</title>
-            <pubDate>Mon, 05 Oct 2026 02:02:14 +0800</pubDate>
-            <sparkle:version>14</sparkle:version>
-            <sparkle:shortVersionString>0.2.0</sparkle:shortVersionString>
+            <title>0.2.1</title>
+            <pubDate>Mon, 05 Oct 2026 09:56:12 +0800</pubDate>
+            <sparkle:version>15</sparkle:version>
+            <sparkle:shortVersionString>0.2.1</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/Nu1sance/DailyDisk-Releases/releases/download/v0.2.0/DailyDisk-0.2.0-14-arm64.zip" length="7118187" type="application/octet-stream" sparkle:edSignature="fBk9jPzqKi/PumgcEQpcjgToXAHphSyQTr2aaRsuWj96LDlSQlaHONTyjUoqgmK3YQHbnvPSovUzvPB/9c/4AQ=="/>
+            <enclosure url="https://github.com/Nu1sance/DailyDisk/releases/download/v0.2.1/DailyDisk-0.2.1-15-arm64.zip" length="7118343" type="application/octet-stream" sparkle:edSignature="LFYgnCLz5Jydpf/lcORHqFnRq9PxbY8GF4gpaszaCj3E8APx2LZ1oGDzRsieetsSfA0YtZuU0oTnzWmfPXBYCg=="/>
         </item>
     </channel>
 </rss>
