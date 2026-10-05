@@ -19,9 +19,9 @@ DailyDisk 是一款 macOS 磁盘增长监测应用，帮助你了解：磁盘比
 
 适用于 **macOS 15 及以上**、使用内置 APFS 启动磁盘的 Mac。当前下载包面向 **Apple Silicon**；默认不检查外置硬盘和网络磁盘。
 
-从 [GitHub Releases](https://github.com/Nu1sance/DailyDisk/releases) 下载附件中的应用 ZIP，解压后将 DailyDisk 放入“应用程序”。请只保留一份日常使用的应用。
+从 [最新正式版](https://github.com/Nu1sance/DailyDisk/releases/latest) 下载 Apple Silicon 安装包（DMG 或 ZIP），将 DailyDisk 放入“应用程序”。请只保留一份日常使用的应用。
 
-**目前提供的是已签名、尚未公证的测试版。** macOS 可能阻止首次打开，它还不具备面向普通用户的无障碍下载安装体验。确认下载来源可信后，可参考 [Apple 的打开应用说明](https://support.apple.com/102445)。
+**正式版 0.2.1（构建 16）已完成 Apple 公证。** 首次打开时 macOS 仍可能要求确认下载来源；完全磁盘访问与后台运行权限也需要按提示授权。已有测试版用户可直接使用“检查更新…”升级到正式版，之后继续接收稳定更新。
 
 1. 打开 DailyDisk，按提示在系统设置中授予“完全磁盘访问权限”，然后退出并重新打开应用。
 2. 点击“启用每日检查”，如系统要求，允许 DailyDisk 后台运行。
