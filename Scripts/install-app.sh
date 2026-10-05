@@ -65,6 +65,7 @@ require_idle() {
         $1 ~ /^user\// {
             uid=substr($1, 6)
             if (uid !~ /^[0-9]+$/) bad=1
+            uid += 0  # substr yields a string; compare UID numbers, not lexical order
             if (uid == current) found=1
             if (uid >= 500 && uid != current) bad=1
         }

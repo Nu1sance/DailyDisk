@@ -300,3 +300,16 @@ func updateOtherUserSession() async throws {
     #expect(try await control.updatePreparation() == nil)
     #expect(await manager.status() == .enabled)
 }
+
+@Test("Installation lease releases before an async caller drops its retained wrapper")
+func explicitInstallationLeaseRelease() async throws {
+    let root = try updateRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let control = try RunControlStore(rootURL: root.appendingPathComponent("Control"))
+    let previous = try await control.acquireInstallationLease(installationDirectory: root)
+    previous.release()
+    let next = try await control.acquireInstallationLease(installationDirectory: root)
+    next.release()
+    previous.release()
+    withExtendedLifetime((previous, next)) {}
+}

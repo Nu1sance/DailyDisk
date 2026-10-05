@@ -24,11 +24,6 @@ struct SettingsView: View {
                                     && controller.updatePreparation?.targetBuild
                                         != DailyDiskProduct.installedBuildNumber)
                         )
-                } else {
-                    Button("准备安装更新") { Task { await controller.prepareForUpdate() } }
-                        .disabled(controller.isPreparingUpdate)
-                    Text("手动替换应用前，请先准备安装更新；应用内更新会自动完成准备。")
-                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
 
@@ -95,6 +90,12 @@ struct SettingsView: View {
             }
 
             Section("高级操作") {
+                if controller.updatePreparation == nil {
+                    Button("暂停运行以手动替换应用") { Task { await controller.prepareForUpdate() } }
+                        .disabled(controller.isPreparingUpdate)
+                    Text("仅在手动替换应用时使用：暂停新扫描并暂时移除每日任务，完成后在软件更新中恢复运行。应用内更新会自动处理这些步骤。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Button("重新完整检查磁盘") {
                     Task { await controller.scanNow(requestedMode: .fullReconciliation) }
                 }

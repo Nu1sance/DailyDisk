@@ -55,7 +55,7 @@ public final class UpdateWorkLease: @unchecked Sendable {
 /// file: another process may still hold its inode. The durable update marker
 /// separately spans GUI termination and external Sparkle installation.
 final class AppInstallationLease: @unchecked Sendable {
-    private let lease: UpdateWorkLease
+    private var lease: UpdateWorkLease?
     init(controlDirectory: URL, installationDirectory: URL) throws {
         var status = stat()
         let legacy = installationDirectory.appendingPathComponent(".DailyDisk-install.lock")
@@ -70,6 +70,10 @@ final class AppInstallationLease: @unchecked Sendable {
             throw UpdatePreparationError.installationInProgress
         }
     }
+
+    // Async call frames can retain this wrapper beyond the operation's return.
+    // Release deterministically before allowing the next actor operation.
+    func release() { lease = nil }
 }
 
 extension UpdatePreparationError: LocalizedError {

@@ -43,7 +43,7 @@ public actor UpdateCoordinator {
         defer { operating = false }
         try checkSessions()
         let installation = try await control.acquireInstallationLease(installationDirectory: installationDirectory)
-        defer { withExtendedLifetime(installation) {} }
+        defer { installation.release() }
         guard !writerIsActive(), try await !manager.runtimeStatus().isRunning else {
             throw UpdatePreparationError.busy
         }
@@ -82,7 +82,7 @@ public actor UpdateCoordinator {
         defer { operating = false }
         try checkSessions()
         let installation = try await control.acquireInstallationLease(installationDirectory: installationDirectory)
-        defer { withExtendedLifetime(installation) {} }
+        defer { installation.release() }
         guard let state = try await control.updatePreparation(), state.phase == .ready,
             await manager.status() == .notRegistered, try await !manager.runtimeStatus().isRunning,
             !writerIsActive()
@@ -105,7 +105,7 @@ public actor UpdateCoordinator {
         defer { operating = false }
         try checkSessions()
         let installation = try await control.acquireInstallationLease(installationDirectory: installationDirectory)
-        defer { withExtendedLifetime(installation) {} }
+        defer { installation.release() }
         guard let state = try await control.updatePreparation() else { return }
         if state.phase == .sparkleInstalling {
             guard state.targetBuild == currentBuild, state.sourceBuild != currentBuild else {

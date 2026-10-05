@@ -1,1 +1,5 @@
-{"version":"0.2.0","buildNumber":"14","minimumMacOSVersion":"15.0"}
+{
+  "version": "0.2.1",
+  "buildNumber": "15",
+  "minimumMacOSVersion": "15.0"
+}

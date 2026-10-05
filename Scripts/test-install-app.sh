@@ -25,7 +25,7 @@ MOCK
 cat > "$FIXTURE/bin/launchctl" <<'MOCK'
 #!/bin/bash
 if [[ "$*" == "print system" ]]; then
-    printf 'system = {\n user/%s\n' "$(id -u)"
+    printf 'system = {\n user/0\n user/99\n user/306\n user/%s\n' "$(id -u)"
     if [[ "${OTHER_SESSION:-0}" == 1 ]]; then printf 'user/99999\n'; fi
     printf '}\n'
     exit 0

@@ -6,7 +6,7 @@ DailyDisk is currently pre-1.0 and supports the latest source revision on macOS 
 
 ## Reporting a vulnerability
 
-Do not attach a real DailyDisk database, report, or path-bearing diagnostic export to a public issue. Submit reports through [GitHub private vulnerability reporting](https://github.com/xiuyuwu/DailyDisk/security/advisories/new). If that endpoint is unavailable, do not publish exploit or path data; contact the repository owner through the private contact method listed on the GitHub profile first.
+Do not attach a real DailyDisk database, report, or path-bearing diagnostic export to a public issue. Submit reports through [GitHub private vulnerability reporting](https://github.com/Nu1sance/DailyDisk/security/advisories/new). If that endpoint is unavailable, do not publish exploit or path data; contact the repository owner through the private contact method listed on the GitHub profile first.
 
 Include:
 
@@ -19,9 +19,9 @@ Exclude usernames, home paths, inventory databases, report JSON, notification sc
 
 ## Security model
 
-- No application runtime network requests, telemetry, cloud service, or remote command execution (source checkout/package resolution and signature timestamping can use the network)
+- No telemetry or upload of inventory/reports. User-initiated software updates contact GitHub Pages and GitHub Releases through Sparkle; source checkout/package resolution and signature timestamping also use the network.
 - No shell interpolation for system commands
-- No root helper, `sudo`, setuid executable, or LaunchDaemon
+- No root scanning helper, `sudo`-based installation, setuid executable, or LaunchDaemon. Sparkle may request administrator authorization to replace an application in a protected location.
 - User-domain LaunchAgent only
 - Full Disk Access is manual and does not bypass SIP/POSIX controls
 - Descriptor-relative traversal with no symlink following
