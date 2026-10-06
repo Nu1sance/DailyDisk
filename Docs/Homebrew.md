@@ -1,10 +1,10 @@
 # Homebrew installation and updates
 
-The native-command implementation is on the Homebrew integration branch. Publication of `nu1sance/tap/dailydisk` requires its new signed/notarized release; do not point this Cask at build 16, which has no native installer. Public Tap/release acceptance is still pending.
+The public Tap is [Nu1sance/homebrew-tap](https://github.com/Nu1sance/homebrew-tap). Its initial release is notarized DailyDisk 0.2.2 build 17. Build 16 has no native installer and cannot be used with this Cask. Implementation source remains on the Homebrew integration branch pending mainline review.
 
 ## User workflow
 
-The intended one-command installation is:
+One-command installation:
 
 ```bash
 brew install --cask nu1sance/tap/dailydisk
