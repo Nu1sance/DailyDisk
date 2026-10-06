@@ -1,44 +1,47 @@
-# Homebrew integration status
+# Homebrew installation and updates
 
-Homebrew distribution is not released yet. Continue using the notarized release and in-app updates. No production Tap/Cask should be published until application replacement is protected for its entire lifetime, including old-app removal and rollback.
+The native-command implementation is on the Homebrew integration branch. Publication of `nu1sance/tap/dailydisk` requires its new signed/notarized release; do not point this Cask at build 16, which has no native installer. Public Tap/release acceptance is still pending.
 
-## Reproducible contract probe
+## User workflow
 
-The optional probe uses the installed Homebrew implementation, synthetic Info.plist files and temporary directories. It does not install a Cask, alter receipts, launch DailyDisk, or access the inventory database:
+The intended one-command installation is:
 
 ```bash
-HOMEBREW_DEVELOPER=1 HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ANALYTICS=1 \
-  brew ruby Scripts/Homebrew/test-contract.rb
+brew install --cask nu1sance/tap/dailydisk
 ```
 
-The explicit developer environment avoids permanently enabling Homebrew developer mode. Homebrew is a prerequisite only for this optional integration probe, not for building or running DailyDisk. Start from default auto-update Cask settings; an environment disabling those updates will intentionally change the expected matrix.
+Target: Apple Silicon, macOS 15+, `/Applications`. A user without destination write access may use `--appdir="$HOME/Applications"`; never sudo the installer. Keep one production app across these locations.
 
-The probe checks actual Cask version discovery and Installer orchestration. It replaces app mutation and receipt-writing operations with observers. A separate real structured preflight runs a short-lived lock holder through Homebrew's normal subprocess/sandbox path. Thus this is evidence about callback boundaries, not full installation or crash-recovery acceptance.
+Before replacing/removing an existing app, wait for scans, select **Settings → General → Advanced → 暂停运行以手动替换应用**, then quit the GUI/CLI. After replacement, reopen and choose **恢复运行** to restore the prior daily-task preference. First installation needs no preparation. Uninstall retains data/reports; there is no zap stanza.
 
-Validated against Homebrew 7.0.7:
+Standard `brew update`, `brew upgrade --cask nu1sance/tap/dailydisk`, `brew reinstall --cask nu1sance/tap/dailydisk` and `brew uninstall --cask nu1sance/tap/dailydisk` remain the user commands. `update` refreshes metadata; `upgrade` installs eligible updates. Sparkle remains available. Brew decides from its receipt whether to download; the native installer preserves an equal/newer signed actual build, preventing downgrade when Sparkle is ahead. Redundant downloads are possible. Equal-build reinstall is a no-op; invalid signatures are rejected rather than silently overwritten.
 
-- Ordinary auto_updates version checks recognize an app updated by Sparkle and skip a newer actual marketing version when the Tap lags.
-- A higher build with the same marketing version can be missed. Public upgrade releases must increase both marketing version and build.
-- Greedy checks can use stale receipts even when the installed app is newer. Independent downgrade protection is required.
-- Missing Info.plist and installer-only artifacts can be treated as not outdated; this does not establish installation health.
-- An upgrade removes old app artifacts before new preflight. Failed installation can omit new postflight before restoring the old artifacts.
-- A lock scoped to a preflight child is released before the app artifact executes. It cannot protect the replacement transaction.
-- A custom installer without an app artifact loses the actual bundle discovery used by auto_updates. Adding both artifacts causes two independent mutation stages unless ownership is explicitly redesigned.
+After interruption, quit the app and retry the failed Brew command (use reinstall if the receipt is already current). Retry validates signed installed/backup copies under exclusive locks, restores an old copy if replacement never finished, or retains a valid target and completes cleanup. Never delete Control markers to force recovery. Corruption or missing signed copies may need expert inspection.
 
-## Remaining release gate
+## Transaction boundary
 
-The declarative Cask must retain ordinary app tracking without exposing unguarded replacement. Investigate a controlled Homebrew transaction entry point with fixed operations and signed installation coordination; direct operations must fail before mutation unless protection is established. The protocol must cover first install, upgrade, reinstall, uninstall, failure, parent/child termination and rollback. A background lock process or elapsed timeout is not proof that all mutation processes have stopped.
+The Cask has only installer/uninstall scripts invoking the ordinary signed GUI executable in headless modes. No app artifact, global Ruby hooks, wrapper command, resident service or custom receipt writes. It deliberately omits auto_updates: installer-only Casks lack reliable app-version discovery.
 
-Do not modify a published notarized app or Homebrew's receipts. A new runtime protocol requires a new ordinary signed/notarized release before Cask publication. Keep prototype results and machine-specific investigation under `.local-notes/homebrew/`.
+Homebrew invokes uninstall callbacks during upgrade/reinstall and rollback. The native parser examines same-user ancestry and argv of standard Apple Silicon/Intel brew.rb paths. These internal callbacks do not remove the app; only explicit uninstall/remove/rm does. Unknown contexts fail closed. Custom Homebrew prefixes and brew bundle are not supported by this protocol.
 
-References: [Cask Cookbook](https://docs.brew.sh/Cask-Cookbook), [Homebrew Cask implementation](https://github.com/Homebrew/brew/blob/7.0.7/Library/Homebrew/cask/cask.rb), [Installer](https://github.com/Homebrew/brew/blob/7.0.7/Library/Homebrew/cask/installer.rb).
+A single native process holds private installation and exclusive helper admission leases across all synchronous filesystem mutations. No mutating subprocess can survive the lease holder. Protocol-v2 externalInstalling/externalRecoveryRequired persists operation, builds, ID and original task preference; manual/Sparkle records remain v1. GUI restart, elapsed time and postflight never release the gate. Normal completion restores manual ready for explicit task restoration; fresh installation clears its no-task gate. Uninstall clears the gate after app removal.
 
-## Native-command implementation branch
+Signature checks cover the Developer ID identity, nested code and GUI/helper/CLI designated requirements. Build comparisons read the actual plist without Bundle caching. Replacement requires an idle GUI/helper/CLI, unregistered job, single user session and valid destination. Staging and backup live beside the target. Runtime history stays in the original per-user Application Support directory; no database migration.
 
-The selected direction is to preserve standard `brew install`, `upgrade`, `reinstall` and `uninstall`, not require a replacement command. The first implementation layer adds durable external installation admission; it is not a usable Cask yet.
+Homebrew retains its staged Caskroom payload for uninstall/rollback. Do not open it or grant it Full Disk Access. Headless modes do not create NSApplication or register a GUI scene.
 
-An explicitly prepared `ready` update may transition to protocol-v2 `externalInstalling` under the installation lease, Control lock and exclusive helper admission lease. The record contains only operation, source/target builds, transaction ID and the original task preference. Failure may transition to `externalRecoveryRequired`; both phases block helper admission, manual/scheduled requests, ordinary Resume, Sparkle installation and source replacement. Callback termination, GUI restart or the presence of the target build cannot clear the record. Legacy manual/Sparkle state remains protocol v1; older releases fail closed on protocol v2.
+## Verification and release maintenance
 
-Admission and failure APIs remain internal and are only exercised by synthetic tests. No executable mode or Cask can enter these states in production yet. There is deliberately no completion/unlock API: the adapter must first establish a terminal boundary covering Homebrew rollback and surviving mutation subprocesses. Build comparisons currently validate intent metadata; they are not verification of the installed app's signature or actual version. First-install admission, trusted bundle verification, finalization, interrupted recovery and the native Cask adapter remain subsequent work.
+Run the normal Swift suite and source-installer checks, plus optional integration tests:
 
-Tests reopen persisted records, race admission against GUI Resume, preserve enabled/disabled preferences, reject malformed or stale state and prove that a released callback lease does not release the durable gate. The source installer has a separate synthetic rejection test for these states. No inventory schema change is involved.
+```bash
+HOMEBREW_DEVELOPER=1 HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ANALYTICS=1 brew ruby Scripts/Homebrew/test-contract.rb
+python3 Scripts/Homebrew/test-native-lifecycle.py
+python3 Scripts/Homebrew/test-process-death.py
+```
+
+The first probe documents actual Homebrew version/flight behavior with observed mutations. The second runs real native commands against a temporary synthetic Tap: install, reinstall, upgrade, newer-app preservation, failure and uninstall. Its production ancestry parser is compiled locally, outside the simulated quarantined download. This is separate from Gatekeeper acceptance. The third SIGKILLs the actual Swift transaction process after copying, old-app removal and new-app placement, then verifies durable blocking and recovery on another invocation. Fixtures never adopt production apps, receipts or inventory.
+
+Scripts/Homebrew/render-cask.py renders the Cask from marketing version, increasing build and final stapled ZIP SHA-256. Publish immutable notarized bytes before updating the Tap. Verify hash, Gatekeeper, native command execution and Cask syntax/style before announcing availability. Keep both established Sparkle feeds stable. Intel, custom prefixes, standard-user and fresh-Mac acceptance are not implied by administrator testing.
+
+References: [Cask Cookbook](https://docs.brew.sh/Cask-Cookbook), [Installer](https://github.com/Homebrew/brew/blob/7.0.7/Library/Homebrew/cask/installer.rb).

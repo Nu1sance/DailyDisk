@@ -143,9 +143,9 @@ struct SettingsView: View {
     private var updatePreparationMessage: String {
         switch controller.updatePreparation?.phase {
         case .externalInstalling:
-            "外部安装尚未确认结束，扫描与任务恢复保持暂停。关闭或重新打开应用不会解除保护。"
+            "Homebrew 安装尚未完成，扫描保持暂停。若安装已中断，请退出应用并重试原 brew 命令。"
         case .externalRecoveryRequired:
-            "外部安装需要恢复检查。扫描仍保持暂停，请勿删除更新状态文件或强行恢复每日任务。"
+            "Homebrew 安装需要恢复。请退出应用并重试原 brew 命令；不要删除更新状态文件或强行恢复每日任务。"
         case .sparkleInstalling:
             "正在更新，扫描已暂停；新版本启动后会恢复原有每日任务。若安装中断，请重新检查更新并完成安装。"
         default:

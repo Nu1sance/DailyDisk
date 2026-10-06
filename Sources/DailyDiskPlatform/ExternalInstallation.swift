@@ -1,7 +1,7 @@
 import Foundation
 
 /// Fixed-schema metadata only. No paths, commands, process names or credentials.
-/// Admission is not completion: a Cask postflight is not a terminal transaction fence.
+/// Admission is not completion: only the native file transaction may resolve it.
 public enum ExternalInstallationOperation: String, Codable, Sendable, CaseIterable {
     case install, upgrade, reinstall, uninstall
 }

@@ -94,8 +94,8 @@ public actor UpdateCoordinator {
         return state.id
     }
 
-    /// First-stage admission for a future native Cask adapter. Deliberately not
-    /// exposed as a command until success, rollback and orphan-child fences exist.
+    /// Admission-only test seam. The native installer instead retains its leases
+    /// across mutation and resolution through ExternalAppTransaction.
     func beginExternalInstallation(intent: ExternalInstallationIntent) async throws -> UUID {
         guard !operating else { throw UpdatePreparationError.busy }
         operating = true

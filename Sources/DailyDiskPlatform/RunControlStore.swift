@@ -161,14 +161,14 @@ public actor RunControlStore: ScanProgressReporting, ScanCancellationChecking, S
     /// Internal until the complete Homebrew transaction adapter is validated.
     /// The coordinator holds the installation lease; the work lease and Control
     /// lock close admission races before publishing the durable protocol-v2 gate.
-    func armExternalInstallation(id: UUID, intent: ExternalInstallationIntent) throws {
+    @discardableResult
+    func armExternalInstallation(id: UUID, intent: ExternalInstallationIntent) throws -> UpdateWorkLease {
         try withLock {
             try validateRoot()
             guard var state = try readUpdate(), state.id == id, state.phase == .ready else {
                 throw UpdatePreparationError.invalidState
             }
             let work = try UpdateWorkLease(url: rootURL.appendingPathComponent(".update-work.lock"), exclusive: true)
-            defer { withExtendedLifetime(work) {} }
             guard !fileExists(.active), !fileExists(.pending) else { throw UpdatePreparationError.busy }
             state.version = 2
             state.phase = .externalInstalling
@@ -177,6 +177,43 @@ public actor RunControlStore: ScanProgressReporting, ScanCancellationChecking, S
             state.targetBuild = intent.targetBuild
             try state.validate()
             try write(state, to: .update, allowedKeys: Self.updateKeys)
+            return work
+        }
+    }
+
+    /// The native installer retains both leases across every in-process file
+    /// mutation, rollback and this transition. No Homebrew app artifact may run
+    /// outside that transaction. Resolution is not a public Control command.
+    func resolveExternalInstallation(id: UUID, removed: Bool = false) throws {
+        try withLock {
+            try validateRoot()
+            guard var state = try readUpdate(), state.id == id, state.requiresExternalInstallationResolution else {
+                throw UpdatePreparationError.invalidState
+            }
+            if removed || (state.externalOperation == .install && !state.restoreDailyTask) {
+                guard !removed || state.externalOperation == .uninstall else {
+                    throw UpdatePreparationError.invalidState
+                }
+                try removeIfPresent(.update)
+                try syncDirectory()
+            } else {
+                state.version = 1
+                state.phase = .ready
+                state.externalOperation = nil
+                state.sourceBuild = nil
+                state.targetBuild = nil
+                try write(state, to: .update, allowedKeys: Self.updateKeys)
+            }
+        }
+    }
+
+    func acquireExternalRecoveryLease(id: UUID) throws -> UpdateWorkLease {
+        try withLock {
+            try validateRoot()
+            guard let state = try readUpdate(), state.id == id, state.requiresExternalInstallationResolution,
+                !fileExists(.active), !fileExists(.pending)
+            else { throw UpdatePreparationError.invalidState }
+            return try UpdateWorkLease(url: rootURL.appendingPathComponent(".update-work.lock"), exclusive: true)
         }
     }
 

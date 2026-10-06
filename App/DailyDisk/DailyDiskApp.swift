@@ -9,6 +9,14 @@ enum DailyDiskEntryPoint {
     @MainActor
     static func main() {
         let arguments = Array(CommandLine.arguments.dropFirst())
+        if arguments.first == HomebrewInstallation.installCommand
+            || arguments.first == HomebrewInstallation.uninstallCommand
+        {
+            // A Caskroom payload is an installer, not another GUI instance.
+            // Avoid registering the staged app with Launch Services.
+            Task { exit(await HomebrewInstallation.run(arguments: arguments)) }
+            dispatchMain()
+        }
         if arguments.first == NotificationDelivery.command || arguments.first == NotificationDelivery.statusCommand {
             NSApplication.shared.setActivationPolicy(.prohibited)
             Task { @MainActor in
