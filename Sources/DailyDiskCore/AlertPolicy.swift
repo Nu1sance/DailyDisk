@@ -118,7 +118,8 @@ public struct AlertPolicy: Sendable {
         {
             reasons.insert(.lowAvailableFraction)
         }
-        if report.largestGrowth.contains(where: { $0.allocatedDelta >= thresholds.largePathGrowthBytes }) {
+        let growthPaths = report.largestGrowth + (report.pathRanking?.directoryGrowth ?? [])
+        if growthPaths.contains(where: { $0.allocatedDelta >= thresholds.largePathGrowthBytes }) {
             reasons.insert(.largePathGrowth)
         }
         if magnitude(report.accounting.reconciliationCorrection) >= thresholds.reconciliationBytes {

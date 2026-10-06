@@ -38,3 +38,12 @@ func systemSourceDescriptions() throws {
     #expect(sourceDescription(try RelativePath(validating: "private/var/db/diagnostics/Signpost")) == "系统诊断日志")
     #expect(sourceDescription(try RelativePath(validating: "private/var/db/diagnostics-other")) == nil)
 }
+
+@Test("Direct rankings retain directory metadata beside child changes")
+func directGrowthChartRetainsIndependentDeltas() throws {
+    let model = GrowthBreakdown(
+        ranking: [try growth("folder", 100), try growth("folder/file", 80), try growth("other", 40)],
+        includesAncestorRollups: false)
+    #expect(model.sources.count == 3)
+    #expect(model.total == 220)
+}

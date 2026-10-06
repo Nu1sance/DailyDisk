@@ -161,3 +161,25 @@ func alertPolicyDetectsThresholds() throws {
     #expect(decision.reasons.contains(.lowAvailableBytes))
     #expect(decision.reasons.contains(.lowAvailableFraction))
 }
+
+@Test("Directory aggregate alerts survive separating direct-path rankings")
+func directoryAggregateAlert() throws {
+    let path = try RelativePath(validating: "folder")
+    let ranking = ReportPathRanking(
+        growth: [
+            RankedPathChange(path: try RelativePath(validating: "folder/file"), allocatedDelta: 100, logicalDelta: 100)
+        ],
+        release: [], directoryGrowth: [RankedPathChange(path: path, allocatedDelta: 20_000, logicalDelta: 20_000)],
+        directoryRelease: [], growthPathCount: 200, releasePathCount: 0, logicalOnlyPathCount: 0)
+    let report = try alertReport(physical: 0, unattributed: 0).replacingPathRanking(ranking)
+    let sample = try StorageSample(
+        storageDomainID: report.storageDomainID, sampledAt: Date(),
+        capacityBytes: 1_000_000, usedBytes: 500_000, availableBytes: 500_000)
+    let policy = AlertPolicy(
+        thresholds: try AlertThresholds(
+            physicalGrowthBytes: 10_000,
+            minimumAvailableBytes: 1_000, minimumAvailableFraction: 0.01, largePathGrowthBytes: 10_000,
+            reconciliationBytes: 10_000, unattributedBytes: 10_000))
+    let decision = try #require(try policy.evaluate(report: report, currentSample: sample))
+    #expect(decision.reasons.contains(.largePathGrowth))
+}

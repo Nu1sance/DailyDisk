@@ -67,6 +67,71 @@ public final class DatabaseResetLease: @unchecked Sendable {
 }
 
 public actor SQLiteReportStore {
+    /// Immutable published ledger rows, bounded by (run_id, sequence). No OFFSET,
+    /// temporary materialized table, persistent cursor or database write.
+    public func reportChangePage(
+        runID: ScanRun.ID, storageDomainID: StorageDomain.ID,
+        afterSequence: Int64 = 0, limit: Int = 100, filter: ReportChangeFilter = .all
+    ) throws -> ReportChangePage {
+        guard afterSequence >= 0, limit > 0, limit <= 1024 else {
+            throw StoreInvariantError.corruptStoredValue("Invalid change page boundary")
+        }
+        let predicate: String
+        switch filter {
+        case .all: predicate = ""
+        case .growth: predicate = "AND l.allocated_delta > 0"
+        case .release: predicate = "AND l.allocated_delta < 0"
+        case .logicalOnly: predicate = "AND l.allocated_delta = 0 AND l.logical_delta <> 0"
+        }
+        let statement = try database.prepare(
+            """
+            SELECT l.sequence, l.payload_json, l.volume_id
+            FROM change_ledger l INDEXED BY change_ledger_run_idx
+            WHERE l.run_id = ? AND l.sequence > ? AND l.classification = 'ordinary' AND l.kind <> 'baseline'
+              AND EXISTS (SELECT 1 FROM daily_reports r WHERE r.run_id = l.run_id AND r.storage_domain_id = ?)
+              AND EXISTS (SELECT 1 FROM volumes v WHERE v.id = l.volume_id AND v.storage_domain_id = ?)
+              \(predicate)
+            ORDER BY l.sequence LIMIT ?
+            """)
+        try statement.bind(runID.rawValue.uuidString, at: 1)
+        try statement.bind(afterSequence, at: 2)
+        try statement.bind(storageDomainID.rawValue, at: 3)
+        try statement.bind(storageDomainID.rawValue, at: 4)
+        try statement.bind(Int64(limit + 1), at: 5)
+        var entries: [ReportChangeEntry] = []
+        while try statement.step() {
+            try Task.checkCancellation()
+            guard let payload = statement.columnData(1) else {
+                throw StoreInvariantError.corruptStoredValue("Missing change")
+            }
+            let change = try decoder.decode(ChangeRecord.self, from: payload)
+            guard change.runID == runID, change.volumeID.rawValue == statement.columnText(2) else {
+                throw StoreInvariantError.corruptStoredValue("Change identity mismatch")
+            }
+            entries.append(ReportChangeEntry(id: statement.columnInt64(0), change: change))
+        }
+        let hasMore = entries.count > limit
+        if hasMore { entries.removeLast() }
+        return ReportChangePage(entries: entries, nextSequence: hasMore ? entries.last?.id : nil)
+    }
+
+    public func rebuiltPathRanking(runID: ScanRun.ID, storageDomainID: StorageDomain.ID) async throws
+        -> ReportPathRanking
+    {
+        var builder = ReportPathRankingBuilder()
+        var cursor: Int64 = 0
+        repeat {
+            try Task.checkCancellation()
+            let page = try reportChangePage(
+                runID: runID, storageDomainID: storageDomainID, afterSequence: cursor, limit: 1024)
+            for entry in page.entries { try builder.append(entry.change) }
+            guard let next = page.nextSequence else { break }
+            cursor = next
+            await Task.yield()
+        } while true
+        return try builder.finish()
+    }
+
     /// A full only satisfies daily work after its report was durably published.
     /// Its day is the actual inventory completion day, not a delayed publication day.
     /// Query full/recovery rows, not the latest run: later failures or increments

@@ -169,14 +169,16 @@ struct StatusView: View {
                     VStack(spacing: 0) {
                         SectionHeader("增长来源") { pathToggle(report) }
                         ChangeSourceList(
-                            ranking: report.largestGrowth, direction: .growth,
+                            ranking: report.largestGrowth, includesAncestorRollups: report.pathRanking == nil,
+                            direction: .growth,
                             disclosePaths: controller.discloseReportPaths)
                     }
                     .frame(maxWidth: .infinity)
                     VStack(spacing: 0) {
                         SectionHeader("释放空间")
                         ChangeSourceList(
-                            ranking: report.largestShrinkage, direction: .release,
+                            ranking: report.largestShrinkage, includesAncestorRollups: report.pathRanking == nil,
+                            direction: .release,
                             disclosePaths: controller.discloseReportPaths)
                     }
                     .frame(minWidth: 220, maxWidth: 320)

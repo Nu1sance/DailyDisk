@@ -177,3 +177,9 @@ Every in-place commit, including subsequent incremental commits, saves its prior
 Idle maintenance keeps a contiguous history suffix covering the 24-hour window and unpublished reports; even a backwards clock cannot remove a needed intermediate version. Only expired published prefixes are removed, under the non-cancellable cleanup progress boundary. Referenced generations remain pinned until their history expires. Old path bytes are stored directly, so node garbage collection cannot destroy historical path reconstruction. Historical reports/ledger/samples remain subject to existing retention, and VACUUM remains threshold/cooldown driven.
 
 Inventory deletion checks index opaque roots once per comparison. Exact roots and merged raw-byte descendant intervals preserve unreadable coverage, including non-UTF-8 names and adjacent directory names. Per-path range lookup is logarithmic in the number of merged intervals; the index is memory-only and does not require a migration.
+
+## Report detail reads
+
+Report JSON optionally includes `pathRanking` with separate bounded direct/ancestor rankings and net path counts. Older payloads remain decodable; no schema migration is needed. The GUI reconstructs legacy rankings in memory from published ordinary, non-baseline ledger records. Historical files and stored payloads remain unchanged.
+
+Complete detail pages seek by `change_ledger_run_idx (run_id, sequence)`, validate the report/domain association, and fetch at most the page size plus one lookahead record. Fixed filters operate on signed allocation/logical deltas. Connections are short-lived, read-only and WAL-aware; no detail copy, persistent pagination state or OFFSET-based scan is introduced.

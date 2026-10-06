@@ -9,6 +9,7 @@ struct ReportDetailView: View {
     let report: DailyReport
     @State private var confirmDisclosure = false
     @State private var confirmExport = false
+    @State private var showAllChanges = false
 
     var body: some View {
         ScrollView {
@@ -31,20 +32,38 @@ struct ReportDetailView: View {
                     numberSize: 40
                 )
                 if !report.isBaseline {
+                    if let ranking = report.pathRanking {
+                        Text(
+                            "占用增加 \(ranking.growthPathCount.formatted()) 条路径 · 减少 \(ranking.releasePathCount.formatted()) 条路径；下方各展示最多 5 项。"
+                        )
+                        .font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Text("旧报告摘要尚未补全；可通过下方全部变化记录查看明细。")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     VStack(spacing: 0) {
                         SectionHeader("增长来源")
                         ChangeSourceList(
-                            ranking: report.largestGrowth, direction: .growth,
+                            ranking: report.largestGrowth, includesAncestorRollups: report.pathRanking == nil,
+                            direction: .growth,
                             disclosePaths: controller.discloseReportPaths)
                     }
                     VStack(spacing: 0) {
                         SectionHeader("释放空间")
                         ChangeSourceList(
-                            ranking: report.largestShrinkage, direction: .release,
+                            ranking: report.largestShrinkage, includesAncestorRollups: report.pathRanking == nil,
+                            direction: .release,
                             disclosePaths: controller.discloseReportPaths)
                     }
                 }
                 details
+                if !report.isBaseline {
+                    Button(showAllChanges ? "收起全部变化记录" : "查看全部变化记录") { showAllChanges.toggle() }
+                    if showAllChanges {
+                        ReportChangeDetailsView(controller: controller, report: report)
+                            .id("\(report.runID)-\(report.storageDomainID.rawValue)")
+                    }
+                }
                 Text("检查编号：\(report.runID.rawValue.uuidString)")
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
@@ -170,14 +189,28 @@ struct ReportDetailView: View {
             if !report.largestGrowth.isEmpty || !report.largestShrinkage.isEmpty {
                 Divider()
                 detail(
-                    "完整排名",
+                    "主要变化排名（各前 10 项）",
                     summary: "增长 \(report.largestGrowth.count) 项 · 释放 \(report.largestShrinkage.count) 项"
                 ) {
                     VStack(alignment: .leading, spacing: 14) {
-                        Text("包含上级目录，因此各项之间可能重叠。")
-                            .font(.caption).foregroundStyle(.secondary)
+                        Text(
+                            report.pathRanking == nil
+                                ? "旧版排名包含上级目录，不代表全部变化。" : "按路径自身的分配空间净变化排名，不混入上级目录汇总；不设大小门槛。JSON 导出保存报告摘要，全部记录请在下方分页查看。"
+                        )
+                        .font(.caption).foregroundStyle(.secondary)
                         rankedList("增长", report.largestGrowth)
                         rankedList("释放", report.largestShrinkage)
+                    }
+                }
+            }
+            if let ranking = report.pathRanking {
+                Divider()
+                detail("目录子项汇总（各前 10 项）", summary: nil) {
+                    VStack(alignment: .leading, spacing: 14) {
+                        Text("按目录下各路径的净变化汇总。上级与下级目录可能重叠，不能将各项相加。")
+                            .font(.caption).foregroundStyle(.secondary)
+                        rankedList("增长", ranking.directoryGrowth)
+                        rankedList("释放", ranking.directoryRelease)
                     }
                 }
             }

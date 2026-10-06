@@ -114,6 +114,15 @@ public struct LocalReportWriter: ReportWriting {
         ]
         appendChanges(title: "Largest growth", values: report.largestGrowth, to: &lines)
         appendChanges(title: "Largest shrinkage", values: report.largestShrinkage, to: &lines)
+        if let ranking = report.pathRanking {
+            lines.append(
+                "Direct-path counts: growth \(ranking.growthPathCount), release \(ranking.releasePathCount), logical-only \(ranking.logicalOnlyPathCount). Rankings are limited to ten entries each; inspect the ledger in the app for all records."
+            )
+            appendChanges(
+                title: "Directory descendant growth (overlapping)", values: ranking.directoryGrowth, to: &lines)
+            appendChanges(
+                title: "Directory descendant release (overlapping)", values: ranking.directoryRelease, to: &lines)
+        }
 
         if let diagnosis = report.physicalDiagnosis {
             lines += [

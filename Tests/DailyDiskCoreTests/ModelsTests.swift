@@ -46,6 +46,13 @@ func reportModelsRoundTripThroughJSON() throws {
     let decoded = try JSONDecoder().decode(DailyReport.self, from: data)
 
     #expect(decoded == report)
+    #expect(decoded.pathRanking == nil)
+    let ranking = try ReportPathRankingBuilder().finish()
+    let enriched = try decoded.replacingPathRanking(ranking)
+    #expect(enriched.accounting == report.accounting)
+    #expect(enriched.coverage == report.coverage)
+    #expect(enriched.generatedAt == report.generatedAt)
+    #expect(try JSONDecoder().decode(DailyReport.self, from: JSONEncoder().encode(enriched)) == enriched)
 }
 
 @Test("FSEvent flags use native CoreServices bit values and preserve unknown bits")

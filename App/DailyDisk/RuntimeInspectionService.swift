@@ -32,6 +32,7 @@ struct RuntimeInspectionSnapshot: Equatable, Sendable {
 }
 
 struct RuntimeInspectionService: Sendable {
+    private static let rankingCache = LegacyRankingCache()
     let databaseURL: URL
 
     init(databaseURL: URL = SQLiteInventoryStore.defaultDatabaseURL) {
@@ -116,12 +117,27 @@ struct RuntimeInspectionService: Sendable {
         guard FileManager.default.fileExists(atPath: databaseURL.path) else { return nil }
         let store = try SQLiteReportStore(databaseURL: databaseURL)
         if let storageDomainID {
-            return try await store.report(
+            let report = try await store.report(
                 runID: runID,
                 storageDomainID: storageDomainID
             )
+            return try await corrected(report, store: store)
         }
-        return try await store.report(runID: runID)
+        return try await corrected(store.report(runID: runID), store: store)
+    }
+
+    func changePage(
+        report: DailyReport, afterSequence: Int64, filter: ReportChangeFilter
+    ) async throws -> ReportChangePage {
+        let store = try SQLiteReportStore(databaseURL: databaseURL)
+        return try await store.reportChangePage(
+            runID: report.runID, storageDomainID: report.storageDomainID,
+            afterSequence: afterSequence, filter: filter)
+    }
+
+    private func corrected(_ report: DailyReport?, store: SQLiteReportStore) async throws -> DailyReport? {
+        guard let report else { return nil }
+        return try await Self.rankingCache.correct(report, databaseURL: databaseURL, store: store)
     }
 
     func reportJSON(
@@ -189,7 +205,10 @@ struct RuntimeInspectionService: Sendable {
                 indexedObjectCount: value.indexedObjectCount
             )
         }
-        let reports = try await store.recentReports(limit: historyLimit)
+        var reports = try await store.recentReports(limit: historyLimit)
+        // Correct only the latest report here. Older reports are rebuilt on
+        // selection, never by every overview refresh across the entire history.
+        if let first = reports.first, let updated = try await corrected(first, store: store) { reports[0] = updated }
         let runs = try await store.recentRuns(limit: historyLimit)
         let diagnostics = detailed ? try await store.diagnostics() : nil
         var errorKinds: [String: Int] = [:]
@@ -222,5 +241,23 @@ struct RuntimeInspectionService: Sendable {
             diagnostics: nil,
             recentErrorKinds: [:]
         )
+    }
+}
+
+private actor LegacyRankingCache {
+    private var reports: [String: DailyReport] = [:]
+    private var order: [String] = []
+
+    func correct(_ report: DailyReport, databaseURL: URL, store: SQLiteReportStore) async throws -> DailyReport {
+        guard report.pathRanking == nil else { return report }
+        let key = "\(databaseURL.path)|\(report.runID.rawValue)|\(report.storageDomainID.rawValue)"
+        if let cached = reports[key] { return cached }
+        let ranking = try await store.rebuiltPathRanking(runID: report.runID, storageDomainID: report.storageDomainID)
+        let corrected = try report.replacingPathRanking(ranking)
+        try Task.checkCancellation()
+        if reports[key] == nil { order.append(key) }
+        reports[key] = corrected
+        while order.count > 32 { reports.removeValue(forKey: order.removeFirst()) }
+        return corrected
     }
 }

@@ -115,3 +115,11 @@ Reports are persisted separately and idempotently after the referenced scan ledg
 Inventory paths are stored relative to their volume as raw bytes. DailyDisk does not Unicode-normalize, case-fold, resolve symlinks, or accept `.`/`..` traversal components. Display strings are lossy views only; raw bytes remain authoritative.
 
 daily inventory reuse keeps the active generation ID on subsequent daily full checks, but the before/after boundary is still the previous committed checkpoint versus the newly sealed inventory. Reusing storage does not turn the run into incremental accounting. Snapshot changes are derived and validated for candidate identities; unchanged objects contribute zero. Old-value recovery rows are storage metadata and never additional growth ledger entries. Physical and DailyDisk-overhead sampling boundaries remain unchanged.
+
+## Report rankings and complete change records
+
+Direct path deltas are netted by raw attribution path before ranking; transfer debits belong to the old canonical path and credits to the new path. Positive and negative allocated-byte rankings each retain ten direct paths. Directory-descendant rollups are ranked separately and overlap; they must not crowd out direct changes. Directory metadata can itself be a direct change. Logical-only changes remain available in the ledger even when allocation does not change.
+
+The GUI summarizes five paths per direction and shows total net growth/release path counts. “全部变化记录” pages ordinary non-baseline ledger records without a size threshold, including zero-allocation path changes. These are recorded accounting transitions, not every filesystem write; repeated paths and balanced transfers can appear. Direction filters apply to each record, whereas summary counts describe net paths. JSON export is a bounded report summary.
+
+Legacy reports lack the optional `pathRanking` field. The GUI rebuilds that summary read-only from the existing published ledger, without changing accounting, sample boundaries, historical JSON/Markdown files or schema. New scans publish separate rankings directly. No extra full inventory or detail ledger is persisted.

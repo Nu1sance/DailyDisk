@@ -13,16 +13,17 @@ struct GrowthBreakdown {
     let sources: [RankedPathChange]
     let total: Double
 
-    init(ranking: [RankedPathChange], direction: Direction = .growth) {
+    init(ranking: [RankedPathChange], direction: Direction = .growth, includesAncestorRollups: Bool = true) {
         let candidates = ranking.filter {
             direction == .growth ? $0.allocatedDelta > 0 : $0.allocatedDelta < 0
         }
         var seen = Set<RelativePath>()
         sources = Array(
             candidates.filter { candidate in
-                !candidates.contains { other in
-                    candidate.path != other.path && PathPolicy.isEqual(other.path, orDescendantOf: candidate.path)
-                } && seen.insert(candidate.path).inserted
+                (!includesAncestorRollups
+                    || !candidates.contains { other in
+                        candidate.path != other.path && PathPolicy.isEqual(other.path, orDescendantOf: candidate.path)
+                    }) && seen.insert(candidate.path).inserted
             }.prefix(5)
         )
         total = sources.reduce(0) { $0 + abs(Double($1.allocatedDelta)) }
@@ -65,11 +66,13 @@ func sourceDescription(_ path: RelativePath) -> String? {
 /// Up to five disjoint growth or release sources, each with a bar relative to the largest one.
 struct ChangeSourceList: View {
     let ranking: [RankedPathChange]
+    var includesAncestorRollups = true
     let direction: GrowthBreakdown.Direction
     let disclosePaths: Bool
 
     var body: some View {
-        let model = GrowthBreakdown(ranking: ranking, direction: direction)
+        let model = GrowthBreakdown(
+            ranking: ranking, direction: direction, includesAncestorRollups: includesAncestorRollups)
         VStack(spacing: 0) {
             if model.sources.isEmpty {
                 Text(direction == .growth ? "这次没有记录到文件增长。" : "这次没有记录到释放的空间。")

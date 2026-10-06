@@ -366,6 +366,25 @@ final class AppController: ObservableObject {
     func selectReport(_ report: DailyReport) {
         selectedReport = report
         discloseReportPaths = false
+        if report.pathRanking == nil {
+            Task {
+                do {
+                    let corrected = try await inspectionService.report(
+                        runID: report.runID, storageDomainID: report.storageDomainID)
+                    guard selectedReport?.reportIdentity == report.reportIdentity else { return }
+                    if let corrected { selectedReport = corrected }
+                } catch {
+                    guard selectedReport?.reportIdentity == report.reportIdentity else { return }
+                    errorMessage = "无法补全这份旧报告的排名，请稍后重新选择报告。"
+                }
+            }
+        }
+    }
+
+    func reportChangePage(_ report: DailyReport, afterSequence: Int64, filter: ReportChangeFilter) async throws
+        -> ReportChangePage
+    {
+        try await inspectionService.changePage(report: report, afterSequence: afterSequence, filter: filter)
     }
 
     func setReportPathDisclosure(_ disclosed: Bool) {
@@ -677,7 +696,8 @@ final class AppController: ObservableObject {
                     && $0.storageDomainID == selectedReport.storageDomainID
             })
         {
-            self.selectedReport = refreshed
+            self.selectedReport =
+                refreshed.pathRanking == nil && selectedReport.pathRanking != nil ? selectedReport : refreshed
         } else {
             selectedReport = values.first
         }

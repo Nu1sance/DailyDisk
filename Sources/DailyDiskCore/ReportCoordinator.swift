@@ -264,7 +264,9 @@ public struct DailyReportCoordinator: Sendable {
             diagnostics.append("Deleted-open-file diagnostics unavailable")
         }
 
-        let ranked = try rankedPathChanges(changes)
+        var rankingBuilder = ReportPathRankingBuilder()
+        for change in changes { try rankingBuilder.append(change) }
+        let ranking = try rankingBuilder.finish()
         let report = try DailyReport(
             runID: runID,
             generatedAt: checkpointDate,
@@ -272,10 +274,11 @@ public struct DailyReportCoordinator: Sendable {
             accounting: accounting,
             reconciliation: reconciliation,
             coverage: coverage,
-            largestGrowth: Array(ranked.filter { $0.allocatedDelta > 0 }.prefix(10)),
-            largestShrinkage: Array(ranked.reversed().filter { $0.allocatedDelta < 0 }.prefix(10)),
+            largestGrowth: ranking.growth,
+            largestShrinkage: ranking.release,
             physicalDiagnosis: physicalDiagnosis,
-            diagnostics: diagnostics
+            diagnostics: diagnostics,
+            pathRanking: ranking
         )
         let artifacts = try await reportWriter.write(report: report)
         let commit = try ReportCommit(
@@ -310,40 +313,6 @@ public struct DailyReportCoordinator: Sendable {
         }
     }
 
-    private func rankedPathChanges(_ changes: [ChangeRecord]) throws -> [RankedPathChange] {
-        struct Delta {
-            var logical: Int64 = 0
-            var allocated: Int64 = 0
-        }
-        var values: [RelativePath: Delta] = [:]
-        for change in changes where change.classification == .ordinary {
-            let path: RelativePath?
-            if case .attributionTransfer(_, .debit) = change.effect {
-                path = change.pathBefore
-            } else {
-                path = change.pathAfter ?? change.pathBefore
-            }
-            guard let path else { continue }
-            for candidate in [path] + PathPolicy.ancestors(of: path) {
-                var delta = values[candidate, default: Delta()]
-                delta.logical = try AccountingMath.add(delta.logical, change.logicalDelta)
-                delta.allocated = try AccountingMath.add(delta.allocated, change.allocatedDelta)
-                values[candidate] = delta
-            }
-        }
-        return values.map {
-            RankedPathChange(
-                path: $0.key,
-                allocatedDelta: $0.value.allocated,
-                logicalDelta: $0.value.logical
-            )
-        }.sorted { lhs, rhs in
-            if lhs.allocatedDelta != rhs.allocatedDelta {
-                return lhs.allocatedDelta > rhs.allocatedDelta
-            }
-            return lhs.path.bytes.lexicographicallyPrecedes(rhs.path.bytes)
-        }
-    }
 }
 
 public enum ReportCoordinatorError: Error, Equatable, Sendable {

@@ -1095,6 +1095,7 @@ public struct AccountingSummary: Codable, Equatable, Sendable {
 }
 
 public struct DailyReport: Codable, Equatable, Sendable {
+    public let pathRanking: ReportPathRanking?
     public let runID: ScanRun.ID
     public let generatedAt: Date
     public let storageDomainID: StorageDomain.ID
@@ -1116,7 +1117,8 @@ public struct DailyReport: Codable, Equatable, Sendable {
         largestGrowth: [RankedPathChange],
         largestShrinkage: [RankedPathChange],
         physicalDiagnosis: PhysicalAttributionDiagnosis? = nil,
-        diagnostics: [String]
+        diagnostics: [String],
+        pathRanking: ReportPathRanking? = nil
     ) throws {
         if let reconciliation {
             guard try reconciliation.correction == accounting.reconciliationCorrection else {
@@ -1142,11 +1144,13 @@ public struct DailyReport: Codable, Equatable, Sendable {
         self.largestShrinkage = largestShrinkage
         self.physicalDiagnosis = physicalDiagnosis
         self.diagnostics = diagnostics
+        self.pathRanking = pathRanking
     }
 
     private enum CodingKeys: String, CodingKey {
         case runID
         case generatedAt
+        case pathRanking
         case storageDomainID
         case accounting
         case reconciliation
@@ -1172,7 +1176,8 @@ public struct DailyReport: Codable, Equatable, Sendable {
                 PhysicalAttributionDiagnosis.self,
                 forKey: .physicalDiagnosis
             ),
-            diagnostics: container.decode([String].self, forKey: .diagnostics)
+            diagnostics: container.decode([String].self, forKey: .diagnostics),
+            pathRanking: container.decodeIfPresent(ReportPathRanking.self, forKey: .pathRanking)
         )
     }
 }
