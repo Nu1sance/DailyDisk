@@ -1,7 +1,16 @@
-<?xml version="1.0" encoding="UTF-8"?>
+<?xml version='1.0' encoding='UTF-8'?>
 <rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
     <channel>
         <title>DailyDisk</title>
+        <item>
+            <title>0.2.4</title>
+            <pubDate>Wed, 07 Oct 2026 01:25:51 +0800</pubDate>
+            <sparkle:version>19</sparkle:version>
+            <sparkle:shortVersionString>0.2.4</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/Nu1sance/DailyDisk/releases/download/v0.2.4/DailyDisk-0.2.4-19-arm64.zip" length="7285392" type="application/octet-stream" sparkle:edSignature="UBsYgKPo5oQu+8sp+GmQSor3rOzYOJoi4a7/mVY8CX7LUpp5TYcAKPbXtf2JPu2+2hddUCm/DJCLpKE7FV3NBw==" />
+        </item>
         <item>
             <title>0.2.3</title>
             <pubDate>Wed, 07 Oct 2026 00:37:24 +0800</pubDate>
