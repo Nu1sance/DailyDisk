@@ -183,3 +183,7 @@ Preparation/restoration now use Control/.installation.lock, without writing in t
 Other user launchd domains conservatively block update preparation and the final install response. Log out other users before updating a shared app, and do not start another login session during the installation. This is a single-user update policy, not an atomic system-wide lock against future logins. Standard-user administrator authorization/cancellation still requires separate real-machine acceptance.
 
 Download/extraction files remain managed by Sparkle’s cache. Only small durable recovery state and reusable coordination files belong in existing Control; state is cleared after safe restoration. Do not put the only recovery state in disposable caches or unlink active flock files. Do not move an already authorized app or retain two production copies merely to change update methods.
+
+## Packaged resource requirement
+
+All three executables use resource bundles under the enclosing app's Contents/Resources. A distributed app must not depend on the source checkout or SwiftPM build directory. Version display reads the signed app's Info.plist; schema resources are required and missing resources produce a controlled error. Source repairs do not modify existing signed/notarized releases: distribute a new increasing build after signing/notarization, and validate Settings and first-run helper operation on another Mac through both DMG and Homebrew.

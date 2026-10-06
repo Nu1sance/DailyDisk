@@ -36,6 +36,7 @@ final class AppController: ObservableObject {
     private let notificationManager: any NotificationAuthorizationManaging
     private let volumeDiscovery: any VolumeDiscovering
     private let launchAgentManager: LaunchAgentManager
+    @Published private(set) var controlDiagnostic: String?
     private let controlStore: RunControlStore?
     private let inspectionService: RuntimeInspectionService
     private let dataResetter: DailyDiskDataResetter
@@ -56,7 +57,8 @@ final class AppController: ObservableObject {
         notificationManager: (any NotificationAuthorizationManaging)? = nil,
         volumeDiscovery: any VolumeDiscovering = APFSVolumeProvider(),
         launchAgentManager: LaunchAgentManager = LaunchAgentManager(),
-        controlStore: RunControlStore? = try? RunControlStore(),
+        controlStore: RunControlStore? = nil,
+        controlStoreFactory: () throws -> RunControlStore = { try RunControlStore() },
         inspectionService: RuntimeInspectionService = RuntimeInspectionService(),
         dataResetter: DailyDiskDataResetter? = nil,
         pollingInterval: Duration = .milliseconds(500),
@@ -70,8 +72,15 @@ final class AppController: ObservableObject {
         }
         self.volumeDiscovery = volumeDiscovery
         self.launchAgentManager = launchAgentManager
-        self.controlStore = controlStore
-        self.updateCoordinator = controlStore.map { UpdateCoordinator(control: $0, manager: launchAgentManager) }
+        let resolvedControl: RunControlStore?
+        do {
+            resolvedControl = try controlStore ?? controlStoreFactory()
+        } catch {
+            resolvedControl = nil
+            controlDiagnostic = Self.controlFailureDescription(error, stage: "initialization")
+        }
+        self.controlStore = resolvedControl
+        self.updateCoordinator = resolvedControl.map { UpdateCoordinator(control: $0, manager: launchAgentManager) }
         self.inspectionService = inspectionService
         self.dataResetter = dataResetter ?? DailyDiskDataResetter()
         self.pollingInterval = pollingInterval
@@ -189,16 +198,16 @@ final class AppController: ObservableObject {
                 await refreshScanState(allowDuringSubmission: true)
                 startProgressPolling()
             default:
-                scanState = .failed(.controlChannel)
+                recordControlFailure(error, stage: "request")
             }
         } catch let error as LaunchAgentManagerError {
             if case .serviceUnavailable = error {
                 scanState = .failed(.launchAgentUnavailable)
             } else {
-                scanState = .failed(.controlChannel)
+                recordControlFailure(error, stage: "launch")
             }
         } catch {
-            scanState = .failed(.controlChannel)
+            recordControlFailure(error, stage: "request")
         }
     }
 
@@ -359,7 +368,7 @@ final class AppController: ObservableObject {
                 }
             }
         } catch {
-            scanState = .failed(.controlChannel)
+            recordControlFailure(error, stage: "observation")
         }
     }
 
@@ -452,6 +461,7 @@ final class AppController: ObservableObject {
                 updatePreparation = try await controlStore?.updatePreparation()
             }
         } catch {
+            controlDiagnostic = Self.controlFailureDescription(error, stage: "updateState")
             errorMessage = "无法读取更新准备状态，请检查本地控制文件。"
         }
     }
@@ -520,6 +530,7 @@ final class AppController: ObservableObject {
                 await scanNow()
             }
         } catch {
+            controlDiagnostic = Self.controlFailureDescription(error, stage: "registration")
             scanState = .failed(.launchAgentUnavailable)
             errorMessage = "无法启用后台检查。请确认应用位于“应用程序”文件夹，再重试。"
         }
@@ -576,14 +587,43 @@ final class AppController: ObservableObject {
     }
 
     func copySanitizedDiagnostics() async {
+        var text: String
         do {
-            let text = try await inspectionService.sanitizedDiagnostics()
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(text, forType: .string)
-            actionMessage = "脱敏诊断已复制。"
+            text = try await inspectionService.sanitizedDiagnostics()
         } catch {
-            errorMessage = "无法生成诊断信息。"
+            text = "DailyDisk \(DailyDiskProduct.version)\ndatabase inspection: unavailable"
         }
+        if let controlDiagnostic { text += "\ncontrol: \(controlDiagnostic)" }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        actionMessage = "脱敏诊断已复制。"
+    }
+
+    private func recordControlFailure(_ error: Error, stage: String) {
+        controlDiagnostic = Self.controlFailureDescription(error, stage: stage)
+        scanState = .failed(.controlChannel)
+    }
+
+    static func controlFailureDescription(_ error: Error, stage: String) -> String {
+        let category: String
+        if let error = error as? RunControlStoreError {
+            // This enum contains only closed categories, integers and phases.
+            category = String(describing: error)
+        } else if let error = error as? LaunchAgentManagerError {
+            switch error {
+            case .unstableApplicationPath: category = "unstableApplicationPath"
+            case .serviceUnavailable: category = "serviceUnavailable"
+            case .launchctlFailed(let code): category = "launchctlFailed(\(code))"
+            case .signalFailed(let code): category = "signalFailed(\(code))"
+            case .runtimeStatusUnavailable: category = "runtimeStatusUnavailable"
+            }
+        } else if error is DecodingError {
+            category = "invalidControlJSON"
+        } else {
+            let native = error as NSError
+            category = "other(code: \(native.code))"
+        }
+        return "\(stage): \(category)"
     }
 
     func openDataDirectory() {

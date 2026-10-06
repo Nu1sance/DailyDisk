@@ -218,3 +218,7 @@ Hover over a scan column in the overview trend to see its report timestamp and s
 The history toolbar shows current path visibility with text and an icon: “路径已隐藏” with eye.slash, or “路径已显示” with eye. Clicking the hidden state still requires confirmation before disclosing paths for the current session; hiding paths is immediate.
 
 Trend bars use blue for increases and gray for decreases; pointer selection changes either sign to a soft lemon yellow adapted for light and dark appearance. Moving away restores the original color.
+
+## Background connection failures
+
+“无法连接后台任务” is a general control-channel failure, not proof that the helper launched or that Full Disk Access was denied. Settings → Diagnostics shows the most recent failure stage and a path-free category/code; Copy Sanitized Diagnostics includes it even if database inspection is unavailable. Distinguish initialization, request, launch, observation, update-state and registration failures. Preserve helper exit/crash evidence when investigating another machine; do not reset Control files or history based on this message alone.

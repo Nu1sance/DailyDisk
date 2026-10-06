@@ -407,3 +407,49 @@ func appSpaceMaintenanceReconnect() async throws {
     #expect(summary.terminalState == .maintenanceCompleted)
     #expect(summary.completedDomainCount == 0)
 }
+
+@Test("Control initialization failures retain a safe diagnostic across refresh")
+@MainActor
+func controlInitializationDiagnostic() async {
+    let controller = AppController(
+        accessProbe: AppAccessProbe(), notificationManager: AppNotificationManager(),
+        volumeDiscovery: AppVolumeDiscovery(),
+        controlStoreFactory: { throw RunControlStoreError.posix(code: 13) })
+    #expect(controller.controlDiagnostic == "initialization: posix(code: 13)")
+    await controller.refreshScanState()
+    #expect(controller.scanState == .failed(.controlChannel))
+    #expect(controller.controlDiagnostic == "initialization: posix(code: 13)")
+}
+
+@Test("Control diagnostics never disclose arbitrary paths or error descriptions")
+@MainActor
+func sanitizedControlFailure() {
+    let privatePath = "/private/fixture-sensitive-path"
+    #expect(
+        AppController.controlFailureDescription(
+            LaunchAgentManagerError.unstableApplicationPath(privatePath), stage: "launch")
+            == "launch: unstableApplicationPath")
+    #expect(
+        AppController.controlFailureDescription(
+            NSError(domain: privatePath, code: 17, userInfo: [NSLocalizedDescriptionKey: privatePath]), stage: "request"
+        )
+            == "request: other(code: 17)")
+    #expect(
+        AppController.controlFailureDescription(
+            LaunchAgentManagerError.launchctlFailed(113), stage: "launch") == "launch: launchctlFailed(113)")
+}
+
+@Test("Malformed persisted control data produces an observation diagnostic")
+@MainActor
+func controlObservationDiagnostic() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let control = try RunControlStore(rootURL: root.appendingPathComponent("Control"))
+    let file = root.appendingPathComponent("Control/progress.json")
+    try Data("{\"phase\": \"invalid-private-fixture\"}".utf8).write(to: file)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+    let controller = makeController(control: control, databaseURL: root.appendingPathComponent("fixture.sqlite"))
+    await controller.refreshScanState()
+    #expect(controller.scanState == .failed(.controlChannel))
+    #expect(controller.controlDiagnostic == "observation: invalidControlJSON")
+}

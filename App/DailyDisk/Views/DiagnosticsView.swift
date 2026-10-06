@@ -15,6 +15,11 @@ struct DiagnosticsView: View {
                         .foregroundStyle(.secondary)
                 }
 
+                if let diagnostic = controller.controlDiagnostic {
+                    GroupBox("后台连接错误（最近一次）") {
+                        Text(diagnostic).textSelection(.enabled)
+                    }
+                }
                 spaceMaintenance
                 databaseHealth
                 helperStatus

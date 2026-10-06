@@ -1,3 +1,4 @@
+import DailyDiskCore
 import Foundation
 
 public enum DailyDiskSchema {
@@ -139,10 +140,10 @@ enum DatabaseMigrator {
     }
 
     private static func loadMigration(named baseName: String) throws -> String {
-        let packagedBundle = Bundle.main.resourceURL
-            .map { $0.appendingPathComponent("DailyDisk_DailyDiskStore.bundle", isDirectory: true) }
-            .flatMap(Bundle.init(url:))
-        let resourceBundle = packagedBundle ?? Bundle.module
+        guard
+            let resourceBundle = DailyDiskResources.bundle(
+                named: "DailyDisk_DailyDiskStore.bundle", developmentBundle: { Bundle.module })
+        else { throw migrationError("Missing packaged schema resources") }
         let candidateURLs = [
             resourceBundle.url(forResource: baseName, withExtension: "sql", subdirectory: "Migrations"),
             resourceBundle.url(forResource: baseName, withExtension: "sql"),
