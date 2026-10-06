@@ -1,6 +1,6 @@
 # Homebrew installation and updates
 
-The public Tap is [Nu1sance/homebrew-tap](https://github.com/Nu1sance/homebrew-tap). Its initial release is notarized DailyDisk 0.2.2 build 17. Build 16 has no native installer and cannot be used with this Cask. The implementation is included in main.
+The public Tap is [Nu1sance/homebrew-tap](https://github.com/Nu1sance/homebrew-tap). Its initial release was notarized DailyDisk 0.2.2 build 17; the current release is 0.2.4 build 19 with the packaged-resource repair. Build 16 has no native installer and cannot be used with this Cask. The implementation is included in main.
 
 ## User workflow
 
