@@ -3,6 +3,15 @@
     <channel>
         <title>DailyDisk</title>
         <item>
+            <title>0.2.6</title>
+            <pubDate>Wed, 07 Oct 2026 16:35:05 +0800</pubDate>
+            <sparkle:version>21</sparkle:version>
+            <sparkle:shortVersionString>0.2.6</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/Nu1sance/DailyDisk/releases/download/v0.2.6/DailyDisk-0.2.6-21-arm64.zip" length="7440098" type="application/octet-stream" sparkle:edSignature="czTina59m3BkG27ZJF0IpJN97tHwo735R4tKUDQlUYVhfZqB2LgRDI7mg4Ol491FWtd5tqfWtMCmuMDyL9XAAw==" />
+        </item>
+        <item>
             <title>0.2.5</title>
             <pubDate>Wed, 07 Oct 2026 15:23:22 +0800</pubDate>
             <sparkle:version>20</sparkle:version>
