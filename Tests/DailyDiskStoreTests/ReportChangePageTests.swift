@@ -83,3 +83,16 @@ func reportChangePages() async throws {
     #expect(ranking.growth.count == 10)
     #expect(try Data(contentsOf: actualWAL) == beforeData)
 }
+
+@Test("Notification samples use the exact committed run and domain")
+func notificationSampleScope() async throws {
+    let fixture = try await StoreFixture()
+    defer { fixture.removeFiles() }
+    let baseline = try await establishBaseline(in: fixture)
+    let reader = try SQLiteReportStore(databaseURL: fixture.databaseURL)
+    let sample = try await reader.storageSampleForReport(runID: baseline.run.id, domainID: fixture.scope.domain.id)
+    #expect(sample?.availableBytes == baseline.sample.availableBytes)
+    #expect(sample?.sampledAt == baseline.sample.sampledAt)
+    #expect(try await reader.storageSampleForReport(runID: baseline.run.id, domainID: StorageDomain.ID("other")) == nil)
+    #expect(try await reader.storageSampleForReport(runID: ScanRun.ID(), domainID: fixture.scope.domain.id) == nil)
+}

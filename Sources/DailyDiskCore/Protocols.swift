@@ -938,12 +938,26 @@ public struct NotificationMessage: Codable, Equatable, Sendable {
     public let body: String
     public let severity: Severity
 
-    public init(identifier: String, title: String, body: String, severity: Severity) {
+    // Optional for compatibility with previously encoded delivery payloads.
+    public let playsSound: Bool?
+    public let badgeCount: Int?
+    public let reportRunID: UUID?
+    public let badgeOnly: Bool?
+
+    public init(
+        identifier: String, title: String, body: String, severity: Severity,
+        playsSound: Bool? = nil, badgeCount: Int? = nil, reportRunID: UUID? = nil, badgeOnly: Bool? = nil
+    ) {
         self.identifier = identifier
         self.title = title
         self.body = body
         self.severity = severity
+        self.playsSound = playsSound
+        self.badgeCount = badgeCount
+        self.reportRunID = reportRunID
+        self.badgeOnly = badgeOnly
     }
+
 }
 
 public protocol NotificationSending: Sendable {

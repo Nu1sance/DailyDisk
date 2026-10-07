@@ -20,6 +20,7 @@ public actor RunControlStore: ScanProgressReporting, ScanCancellationChecking, S
         case helperIdle = "helper-idle.json"
         case lock = ".control.lock"
         case update = "update-preparation.json"
+        case notifications = "notifications.json"
     }
 
     private let rootURL: URL
@@ -75,6 +76,79 @@ public actor RunControlStore: ScanProgressReporting, ScanCancellationChecking, S
 
     deinit {
         close(lockFileDescriptor)
+    }
+
+    private static let notificationKeys: Set<String> = [
+        "version", "enabled", "sound", "badges", "known", "unread", "read", "pending", "lastDelivery",
+    ]
+
+    private func readNotifications() throws -> CompletionNotificationState {
+        let state =
+            try readIfPresent(
+                CompletionNotificationState.self, from: .notifications,
+                allowedKeys: Self.notificationKeys) ?? CompletionNotificationState()
+        try state.validate()
+        return state
+    }
+
+    public func notificationState() throws -> CompletionNotificationState {
+        try withLock {
+            try validateRoot()
+            return try readNotifications()
+        }
+    }
+
+    public func setNotificationPreferences(enabled: Bool? = nil, sound: Bool? = nil, badges: Bool? = nil) throws {
+        try updateNotifications {
+            if let enabled { $0.enabled = enabled }
+            if let sound { $0.sound = sound }
+            if let badges { $0.badges = badges }
+        }
+    }
+
+    public func enqueueCompletionNotifications(_ summary: DailyDiskRunSummary) throws {
+        guard summary.terminalState == .succeeded else { return }
+        try updateNotifications { $0.enqueue(summary.reportRunIDs) }
+    }
+
+    public func markReportRead(_ id: UUID) throws {
+        try updateNotifications { $0.markRead(id) }
+    }
+
+    public func markAllReportsRead() throws {
+        try updateNotifications { state in
+            for id in state.unread { state.markRead(id) }
+        }
+    }
+
+    /// Claim before invoking the OS. A crash after this boundary may lose a
+    /// banner, but another helper must never start a duplicate delivery loop.
+    public func claimCompletionNotification(_ id: UUID) throws -> Bool {
+        var claimed = false
+        try updateNotifications { state in
+            if state.pending.contains(id) {
+                state.pending.removeAll { $0 == id }
+                claimed = true
+            }
+        }
+        return claimed
+    }
+
+    public func recordNotificationDelivery(_ status: NotificationDeliveryStatus) throws {
+        try updateNotifications { $0.lastDelivery = status }
+    }
+
+    private func updateNotifications(_ body: (inout CompletionNotificationState) -> Void) throws {
+        try withLock {
+            try validateRoot()
+            var state = try readNotifications()
+            let previous = state
+            body(&state)
+            try state.validate()
+            if previous != state {
+                try write(state, to: .notifications, allowedKeys: Self.notificationKeys)
+            }
+        }
     }
 
     private static let updateKeys: Set<String> = [
@@ -693,6 +767,13 @@ public actor RunControlStore: ScanProgressReporting, ScanCancellationChecking, S
             guard !fileExists(.active), !fileExists(.pending) else {
                 throw RunControlStoreError.runAlreadyActive
             }
+            var notifications = try readNotifications()
+            notifications.known = []
+            notifications.unread = []
+            notifications.read = []
+            notifications.pending = []
+            notifications.lastDelivery = .none
+            try write(notifications, to: .notifications, allowedKeys: Self.notificationKeys)
             try removeIfPresent(.progress)
             try removeIfPresent(.summary)
             try removeIfPresent(.runBinding)

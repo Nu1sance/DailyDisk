@@ -63,3 +63,18 @@ func unbundledNotificationIsSafe() async throws {
     #expect(await manager.authorizationState() == .unknown)
     await #expect(throws: NotificationManagerError.unsupportedProcess) { try await manager.send(deliveryMessage) }
 }
+
+@Test("Legacy notification payloads decode and invalid badge counts are rejected")
+func notificationBadgePayloadValidation() throws {
+    let old = Data(#"{"identifier":"legacy","title":"Done","body":"Summary","severity":"information"}"#.utf8)
+    let decoded = try NotificationDelivery.decode(arguments: [NotificationDelivery.command, old.base64EncodedString()])
+    #expect(decoded.badgeCount == nil)
+    #expect(decoded.playsSound == nil)
+    let message = NotificationMessage(
+        identifier: "bad", title: "Test", body: "Summary", severity: .information,
+        badgeCount: -1)
+    let payload = try NotificationDelivery.encode(message)
+    #expect(throws: NotificationDeliveryError.invalidPayload) {
+        try NotificationDelivery.decode(arguments: [NotificationDelivery.command, payload])
+    }
+}

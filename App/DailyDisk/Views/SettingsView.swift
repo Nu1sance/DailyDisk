@@ -61,17 +61,45 @@ struct SettingsView: View {
             }
 
             Section("通知") {
+                Toggle(
+                    "检查完成后通知",
+                    isOn: Binding(
+                        get: { controller.completionNotifications.enabled },
+                        set: { value in Task { await controller.setNotificationPreferences(enabled: value) } }))
+                Toggle(
+                    "播放提示音",
+                    isOn: Binding(
+                        get: { controller.completionNotifications.sound },
+                        set: { value in Task { await controller.setNotificationPreferences(sound: value) } }))
+                Toggle(
+                    "应用图标显示未读报告角标",
+                    isOn: Binding(
+                        get: { controller.completionNotifications.badges },
+                        set: { value in Task { await controller.setNotificationPreferences(badges: value) } }))
+                HStack {
+                    Button("发送测试通知") { Task { await controller.sendTestNotification() } }
+                    Button("全部标为已读") { Task { await controller.markAllReportsRead() } }
+                        .disabled(controller.completionNotifications.unread.isEmpty)
+                }
+                Text("最近未读报告：\(controller.completionNotifications.unread.count) 份。打开对应历史报告后清除角标；通知不显示文件路径。")
+                    .font(.caption).foregroundStyle(.secondary)
+                if controller.completionNotifications.lastDelivery == .unavailable {
+                    Text("最近一次通知未能提交，检查报告仍已保存。请检查系统通知设置。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 LabeledContent("当前状态", value: notificationLabel)
                 if controller.notificationState == .denied {
                     Button("打开通知设置") {
                         controller.openNotificationSettings()
                     }
                 } else {
-                    Button("请求通知权限") {
+                    Button("启用或更新通知权限") {
                         Task { await controller.requestNotifications() }
                     }
-                    .disabled(controller.notificationState == .authorized)
+                    Button("打开通知设置") { controller.openNotificationSettings() }
                 }
+                Text("横幅、声音和角标仍以系统通知设置及专注模式为准。")
+                    .font(.caption).foregroundStyle(.secondary)
                 if let message = controller.actionMessage {
                     Text(message)
                         .font(.caption)

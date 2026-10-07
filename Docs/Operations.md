@@ -57,7 +57,7 @@ For each internal APFS domain:
 4. Run an opening/daily full scan when required, or incremental only for a subsequent same-day manual request; fall back to full on untrusted history.
 5. Persist inventory, semantic ledger, diagnostics, samples, generation, and FSEvents checkpoint atomically.
 6. Build and publish a private report pair, then commit the validated report row.
-7. Evaluate alert thresholds and persistent cooldown.
+7. After successful task completion, submit one aggregate completion notice and update unread-report badges.
 8. Rotate/prune owned logs and report directories.
 9. Exit.
 
@@ -121,7 +121,11 @@ Default conditions include:
 - deleted-open files
 - unreadable/error diagnostics
 
-Identical reason sets are suppressed for 24 hours using private persisted alert state. Notifications contain aggregate values only. Notification denial/failure never invalidates a scan or report.
+The current source merges these conditions into successful completion notices for both manual and scheduled checks. There is no minimum change threshold or 24-hour suppression for completion notices. Notifications contain aggregate values only; denial/failure never invalidates a scan or report.
+
+Settings → General → Notifications provides completion, sound (default off) and unread badge toggles, a test notification and mark-all-read. Permissions include alerts, sounds and badges; existing users can request updated permissions and open system notification settings. Clicking a completion notice opens its report with paths hidden. Opening a history report marks it read; mere overview refresh does not. The badge counts unread reports within a bounded 1,024-report recent inbox. Turning off banners can retain badge updates. System Focus and per-feature notification settings determine actual presentation.
+
+Private Control/notifications.json stores versioned preferences, recent IDs and submission status. After a persisted successful summary, helpers enqueue the report and claim the newest pending notice once. Natural restart recovers enqueue, but a crash after claim can lose a banner; no timer retry or backlog storm is introduced. Reset clears unread/receipt state while retaining preferences. Test notifications do not scan, change the unread count, or mark real reports read. This functionality is introduced in 0.2.5 build 20; it is not included in 0.2.4 build 19.
 
 ## Logs
 
@@ -167,7 +171,7 @@ Incremental accounting treats an object created and removed during the same repl
 
 ### Notification process isolation
 
-Scheduled notification delivery runs in a short-lived process of the enclosing signed `Contents/MacOS/DailyDisk` executable. The internal `--deliver-notification` mode accepts a bounded encoded aggregate-only message, uses a prohibited activation policy, creates no SwiftUI scene or inventory writer, never requests authorization, and exits after delivery. The scan helper waits at most 15 seconds; denial, launch failure, timeout, or a child framework crash is caught as notification-unavailable and cannot prevent report/task completion. Alert cooldown is persisted only after successful delivery. The internal `--notification-status` mode reads authorization without sending or requesting permission. The GUI bundle identifier/signature/install path remain unchanged.
+Manual and scheduled completion notification delivery runs in a short-lived process of the enclosing signed `Contents/MacOS/DailyDisk` executable. The internal `--deliver-notification` mode accepts a bounded encoded aggregate-only message, uses a prohibited activation policy, creates no SwiftUI scene or inventory writer, never requests authorization, and exits after delivery. The scan helper waits at most 15 seconds; denial, launch failure, timeout, or a child framework crash is caught as notification-unavailable and cannot prevent report/task completion. Completion notification attempts use stable report IDs and persisted claims. The internal `--notification-status` mode reads authorization without sending or requesting permission. The GUI bundle identifier/signature/install path remain unchanged.
 
 Do not instantiate the system notification center from the bare `DailyDiskAgent` helper: macOS can raise an Objective-C assertion that Swift `catch` cannot handle. `NotificationManager` lazily checks for an app bundle before accessing the center; unsupported processes return an error.
 

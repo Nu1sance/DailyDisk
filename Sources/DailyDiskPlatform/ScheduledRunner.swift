@@ -69,35 +69,6 @@ public struct DailyDiskScheduledRunner: Sendable {
                         commitBoundary: control, runBindingRecorder: control
                     )
                 },
-                scheduledReportHandler: { result in
-                    do {
-                        _ = try await AlertCoordinator(
-                            policy: AlertPolicy(),
-                            stateStore: LocalAlertStateStore(),
-                            notifier: AppProcessNotificationSender()
-                        ).evaluateAndNotify(
-                            report: result.report,
-                            currentSample: result.currentSample
-                        )
-                    } catch {
-                        try? await logger?.log(
-                            level: .warning,
-                            event: "notification-unavailable",
-                            sensitiveMetadata: ["error": String(describing: error)]
-                        )
-                    }
-                    try? await logger?.log(
-                        level: .info,
-                        event: "scan-complete",
-                        runID: result.report.runID.rawValue,
-                        publicMetadata: [
-                            "domain": .identifier(result.report.storageDomainID.rawValue),
-                            "correctionBytes": .bytes(
-                                result.report.accounting.reconciliationCorrection
-                            ),
-                        ]
-                    )
-                },
                 retentionHandler: {
                     let managedRoot = SQLiteInventoryStore.defaultDatabaseURL
                         .deletingLastPathComponent()
@@ -120,6 +91,8 @@ public struct DailyDiskScheduledRunner: Sendable {
                 requestID: runRequest.requestID
             )
             try await control.complete(summary)
+            await CompletionNotificationCoordinator(control: control).processLatestCompletion()
+            try? await logger?.log(level: .info, event: "scheduled-run-finished")
             switch summary.terminalState {
             case .maintenanceCompleted, .succeeded, .skippedNotDue:
                 return 0

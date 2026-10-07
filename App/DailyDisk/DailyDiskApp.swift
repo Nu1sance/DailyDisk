@@ -29,6 +29,8 @@ enum DailyDiskEntryPoint {
 }
 
 struct DailyDiskApplication: App {
+    @NSApplicationDelegateAdaptor(DailyDiskNotificationDelegate.self) private var notificationDelegate
+    @ObservedObject private var notificationNavigation = NotificationNavigation.shared
     @StateObject private var controller: AppController
     @State private var section: MainSection? = .overview
     @StateObject private var updatePresentation: UpdatePresentation
@@ -39,6 +41,7 @@ struct DailyDiskApplication: App {
         _updatePresentation = StateObject(wrappedValue: controller.softwareUpdater.presentation)
     }
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.openWindow) private var openWindow
 
     private var settingsBinding: Binding<Bool> {
         Binding(
@@ -48,14 +51,24 @@ struct DailyDiskApplication: App {
     }
 
     var body: some Scene {
-        WindowGroup("DailyDisk") {
+        WindowGroup("DailyDisk", id: "main") {
             MainWindow(controller: controller, section: $section, showsSettings: settingsBinding)
                 .frame(minWidth: 900, minHeight: 600)
                 .tint(Theme.accent)
                 .sheet(isPresented: settingsBinding, onDismiss: updatePresentation.settingsDidDismiss) {
                     PreferencesView(controller: controller)
                 }
+                .background(NotificationWindowCapture())
+                .onAppear { notificationNavigation.openMainWindow = { openWindow(id: "main") } }
                 .task { await controller.refresh() }
+                .onReceive(notificationNavigation.$reportID) { id in
+                    guard let id else { return }
+                    Task {
+                        await controller.openNotificationReport(id)
+                        section = .history
+                        notificationNavigation.reportID = nil
+                    }
+                }
                 .onChange(of: scenePhase) { _, phase in
                     if phase == .active { Task { await controller.refresh() } }
                 }

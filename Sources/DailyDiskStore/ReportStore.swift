@@ -132,6 +132,22 @@ public actor SQLiteReportStore {
         return try builder.finish()
     }
 
+    public func storageSampleForReport(runID: ScanRun.ID, domainID: StorageDomain.ID) throws -> StorageSample? {
+        let statement = try database.prepare(
+            """
+            SELECT sampled_at, capacity_bytes, used_bytes, available_bytes FROM storage_samples
+            WHERE run_id = ? AND storage_domain_id = ? ORDER BY sampled_at DESC LIMIT 1
+            """)
+        try statement.bind(runID.rawValue.uuidString, at: 1)
+        try statement.bind(domainID.rawValue, at: 2)
+        guard try statement.step() else { return nil }
+        return try StorageSample(
+            storageDomainID: domainID,
+            sampledAt: Date(timeIntervalSince1970: statement.columnDouble(0)),
+            capacityBytes: statement.columnInt64(1), usedBytes: statement.columnInt64(2),
+            availableBytes: statement.columnInt64(3))
+    }
+
     /// A full only satisfies daily work after its report was durably published.
     /// Its day is the actual inventory completion day, not a delayed publication day.
     /// Query full/recovery rows, not the latest run: later failures or increments

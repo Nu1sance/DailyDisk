@@ -73,6 +73,7 @@ struct ReportDetailView: View {
             .frame(maxWidth: 820, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .task(id: report.runID) { await controller.didViewReport(report) }
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button {

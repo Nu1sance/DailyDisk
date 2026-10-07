@@ -61,7 +61,11 @@ public enum NotificationDelivery {
             arguments[1].utf8.count <= maximumPayloadBytes * 2,
             let data = Data(base64Encoded: arguments[1]), data.count <= maximumPayloadBytes
         else { throw NotificationDeliveryError.invalidPayload }
-        return try JSONDecoder().decode(NotificationMessage.self, from: data)
+        let message = try JSONDecoder().decode(NotificationMessage.self, from: data)
+        guard message.badgeCount.map({ (0...CompletionNotificationState.capacity).contains($0) }) ?? true else {
+            throw NotificationDeliveryError.invalidPayload
+        }
+        return message
     }
 
     /// Never requests permission or opens a window. Permission belongs to GUI setup.
@@ -71,8 +75,21 @@ public enum NotificationDelivery {
             return 0
         }
         do {
-            let message = try decode(arguments: arguments)
-            try await NotificationManager().send(message)
+            var message = try decode(arguments: arguments)
+            if message.reportRunID != nil {
+                // Read the badge as late as possible, after any concurrent GUI acknowledgement.
+                let state = try await RunControlStore().notificationState()
+                message = NotificationMessage(
+                    identifier: message.identifier, title: message.title,
+                    body: message.body, severity: message.severity, playsSound: state.sound,
+                    badgeCount: state.badgeCount, reportRunID: message.reportRunID, badgeOnly: !state.enabled)
+            }
+            let manager = NotificationManager()
+            try await manager.send(message)
+            if message.reportRunID != nil {
+                let state = try await RunControlStore().notificationState()
+                try await manager.setBadgeCount(state.badgeCount)
+            }
             return 0
         } catch NotificationManagerError.notAuthorized {
             return 77

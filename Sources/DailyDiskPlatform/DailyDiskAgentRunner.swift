@@ -33,6 +33,9 @@ public struct DailyDiskAgentRunner: Sendable {
             guard let updateLease = try await controlStore.acquireHelperUpdateLease() else { return 0 }
             defer { withExtendedLifetime(updateLease) {} }
             try await controlStore.clearHelperIdle()
+            if !SQLiteReportStore.writerIsActive() {
+                await CompletionNotificationCoordinator(control: controlStore).processLatestCompletion()
+            }
             var exitCode: Int32 = 0
 
             if let active = try await controlStore.activeRequest() {
@@ -73,6 +76,8 @@ public struct DailyDiskAgentRunner: Sendable {
                 exitCode = max(exitCode, await DailyDiskScheduledRunner().run())
             }
 
+            await CompletionNotificationCoordinator(control: controlStore).processLatestCompletion()
+
             // Every normal exit—scheduled, manual, recovered, success, cancel,
             // or failure—passes through this drain/idle handshake.
             while true {
@@ -89,6 +94,7 @@ public struct DailyDiskAgentRunner: Sendable {
                             controlStore: controlStore
                         )
                     )
+                    await CompletionNotificationCoordinator(control: controlStore).processLatestCompletion()
                     continue
                 }
                 if try await controlStore.markHelperIdleIfNoPendingRequest() {

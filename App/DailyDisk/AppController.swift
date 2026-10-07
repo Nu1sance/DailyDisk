@@ -13,6 +13,73 @@ final class AppController: ObservableObject {
         deniedPaths: [],
         missingPaths: []
     )
+    @Published private(set) var completionNotifications = CompletionNotificationState()
+    private var lastNotificationRead = Date.distantPast
+    private var appliedBadge: Int?
+    private var notificationRefreshSequence: UInt64 = 0
+
+    func refreshCompletionNotifications(force: Bool = false) async {
+        guard let controlStore, force || now().timeIntervalSince(lastNotificationRead) >= 2 else { return }
+        lastNotificationRead = now()
+        notificationRefreshSequence &+= 1
+        let sequence = notificationRefreshSequence
+        do {
+            let state = try await controlStore.notificationState()
+            guard sequence == notificationRefreshSequence else { return }
+            completionNotifications = state
+            if force || appliedBadge != state.badgeCount {
+                try await notificationManager.setBadgeCount(state.badgeCount)
+                appliedBadge = sequence == notificationRefreshSequence ? state.badgeCount : nil
+            }
+        } catch {
+            // Notification availability must not overwrite scan diagnostics.
+        }
+    }
+
+    func setNotificationPreferences(enabled: Bool? = nil, sound: Bool? = nil, badges: Bool? = nil) async {
+        guard let controlStore else { return }
+        do {
+            try await controlStore.setNotificationPreferences(enabled: enabled, sound: sound, badges: badges)
+            await refreshCompletionNotifications(force: true)
+        } catch { errorMessage = "无法保存通知设置。" }
+    }
+
+    func sendTestNotification() async {
+        do {
+            try await notificationManager.sendTestNotification(sound: completionNotifications.sound)
+            actionMessage = "测试通知已提交系统。显示方式由系统通知设置和专注模式决定。"
+        } catch { errorMessage = "无法发送测试通知，请检查系统通知权限。" }
+    }
+
+    func didViewReport(_ report: DailyReport) async {
+        guard let controlStore else { return }
+        do {
+            try await controlStore.markReportRead(report.runID.rawValue)
+            try? await notificationManager.removeReportNotification(report.runID.rawValue)
+            await refreshCompletionNotifications(force: true)
+        } catch { errorMessage = "无法更新报告已读状态。" }
+    }
+
+    func markAllReportsRead() async {
+        guard let controlStore else { return }
+        do {
+            let unread = try await controlStore.notificationState().unread
+            try await controlStore.markAllReportsRead()
+            for id in unread { try? await notificationManager.removeReportNotification(id) }
+            await refreshCompletionNotifications(force: true)
+        } catch { errorMessage = "无法更新报告已读状态。" }
+    }
+
+    func openNotificationReport(_ id: UUID) async {
+        do {
+            guard let report = try await inspectionService.report(runID: ScanRun.ID(id)) else {
+                errorMessage = "这份报告已不存在，可能已重置历史。"
+                return
+            }
+            selectReport(report)
+        } catch { errorMessage = "暂时无法读取这份报告，请稍后在历史中查看。" }
+    }
+
     @Published private(set) var notificationState: NotificationAuthorizationState = .unknown
     @Published private(set) var launchAgentStatus: LaunchAgentStatus = .unknown
     @Published private(set) var helperRuntimeStatus: LaunchAgentRuntimeStatus?
@@ -95,6 +162,7 @@ final class AppController: ObservableObject {
         guard !isRefreshing else { return }
         isRefreshing = true
         errorMessage = nil
+        await refreshCompletionNotifications(force: true)
         await refreshUpdatePreparation()
         await refreshScanState()
         startProgressPolling()
@@ -246,6 +314,7 @@ final class AppController: ObservableObject {
         guard !isReadingProgress, allowDuringSubmission || !isSubmittingScanRequest else { return }
         isReadingProgress = true
         defer { isReadingProgress = false }
+        await refreshCompletionNotifications()
         guard let controlStore else {
             scanState = .failed(.controlChannel)
             return
@@ -672,6 +741,7 @@ final class AppController: ObservableObject {
             applyReports([])
             trackedRequestID = nil
             scanState = .idle
+            await refreshCompletionNotifications(force: true)
             actionMessage = "历史、基线和本地报告已重置。"
         } catch {
             errorMessage = "安全重置未完成。"

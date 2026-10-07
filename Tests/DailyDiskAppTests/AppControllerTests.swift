@@ -453,3 +453,56 @@ func controlObservationDiagnostic() async throws {
     #expect(controller.scanState == .failed(.controlChannel))
     #expect(controller.controlDiagnostic == "observation: invalidControlJSON")
 }
+
+private actor AppBadgeProbe: NotificationAuthorizationManaging {
+    private(set) var counts: [Int] = []
+    private(set) var removed: [UUID] = []
+    func authorizationState() -> NotificationAuthorizationState { .authorized }
+    func requestAuthorization() -> Bool { true }
+    func setBadgeCount(_ count: Int) { counts.append(count) }
+    func removeReportNotification(_ id: UUID) { removed.append(id) }
+}
+
+@Test("GUI refresh preserves unread badges, viewing one report clears only that report")
+@MainActor
+func guiUnreadReportBadges() async throws {
+    let root = appControlRoot()
+    defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent()) }
+    let control = try RunControlStore(rootURL: root)
+    let probe = AppBadgeProbe()
+    let controller = AppController(
+        accessProbe: AppAccessProbe(), notificationManager: probe,
+        volumeDiscovery: AppVolumeDiscovery(), controlStore: control,
+        inspectionService: RuntimeInspectionService(databaseURL: root.appendingPathComponent("absent.sqlite")))
+    let first = UUID()
+    let second = UUID()
+    try await control.enqueueCompletionNotifications(
+        DailyDiskRunSummary(
+            requestID: UUID(), trigger: .manual, terminalState: .succeeded,
+            startedAt: Date(timeIntervalSince1970: 1), finishedAt: Date(timeIntervalSince1970: 2),
+            completedDomainCount: 2, failedDomainCount: 0, reportRunIDs: [first, second]))
+    await controller.refreshCompletionNotifications(force: true)
+    #expect(await probe.counts.last == 2)
+    #expect(try await control.notificationState().unread.count == 2)
+    let report = try DailyReport(
+        runID: ScanRun.ID(first), generatedAt: Date(), storageDomainID: StorageDomain.ID("fixture"),
+        accounting: AccountingSummary(
+            eventAttributedDelta: 1, reconciliationCorrection: 0,
+            reconciledIndexedDelta: 1, dailyDiskOverheadDelta: 0, physicalUsedDelta: 1, physicalUnattributedDelta: 0),
+        reconciliation: nil,
+        coverage: ScanCoverage(
+            visitedPathCount: 1, indexedObjectCount: 1, unreadablePathCount: 0, transientErrorCount: 0),
+        largestGrowth: [], largestShrinkage: [], diagnostics: [])
+    await controller.didViewReport(report)
+    #expect(await probe.counts.last == 1)
+    #expect(await probe.removed == [first])
+    #expect(try await control.notificationState().unread == [second])
+    await controller.setNotificationPreferences(badges: false)
+    #expect(await probe.counts.last == 0)
+    #expect(try await control.notificationState().unread == [second])
+    await controller.setNotificationPreferences(badges: true)
+    #expect(await probe.counts.last == 1)
+    await controller.markAllReportsRead()
+    #expect(await probe.counts.last == 0)
+    #expect(try await control.notificationState().unread.isEmpty)
+}
