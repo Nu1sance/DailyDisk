@@ -10,7 +10,11 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section("软件更新") {
-                SoftwareUpdateSettings(updater: controller.softwareUpdater)
+                SoftwareUpdateSettings(
+                    updater: controller.softwareUpdater,
+                    blocked: controller.scanState.isActive || controller.helperRuntimeStatus?.isRunning == true
+                        || controller.updatePreparation != nil || controller.isPreparingUpdate
+                        || !controller.hasRefreshed)
                 LabeledContent("版本", value: "\(DailyDiskProduct.version) (\(DailyDiskProduct.installedBuildNumber))")
                 if controller.updatePreparation != nil {
                     Text(updatePreparationMessage)
@@ -205,7 +209,20 @@ struct SettingsView: View {
 
 private struct SoftwareUpdateSettings: View {
     @ObservedObject var updater: SoftwareUpdater
+    var blocked: Bool
     var body: some View {
+        if updater.isConfigured {
+            Toggle(
+                "每天自动检查更新",
+                isOn: Binding(
+                    get: { updater.automaticallyChecks }, set: { updater.automaticallyChecks = $0 }))
+            Text("应用运行时每天静默检查；退出后下次打开补查。仅在点击后下载和安装。")
+                .font(.caption).foregroundStyle(.secondary)
+            if let update = updater.availableUpdate {
+                LabeledContent("可用版本", value: update.version)
+                AvailableSoftwareUpdateButton(updater: updater, blocked: blocked)
+            }
+        }
         CheckForSoftwareUpdates(updater: updater)
         if let message = updater.message {
             Text(message).font(.caption).foregroundStyle(.secondary)

@@ -60,7 +60,10 @@ struct DailyDiskApplication: App {
                 }
                 .background(NotificationWindowCapture())
                 .onAppear { notificationNavigation.openMainWindow = { openWindow(id: "main") } }
-                .task { await controller.refresh() }
+                .task {
+                    await controller.refresh()
+                    controller.softwareUpdater.checkAutomaticallyIfDue()
+                }
                 .onReceive(notificationNavigation.$reportID) { id in
                     guard let id else { return }
                     Task {
@@ -70,7 +73,12 @@ struct DailyDiskApplication: App {
                     }
                 }
                 .onChange(of: scenePhase) { _, phase in
-                    if phase == .active { Task { await controller.refresh() } }
+                    if phase == .active {
+                        Task {
+                            await controller.refresh()
+                            controller.softwareUpdater.checkAutomaticallyIfDue()
+                        }
+                    }
                 }
         }
         .defaultSize(width: 1100, height: 740)

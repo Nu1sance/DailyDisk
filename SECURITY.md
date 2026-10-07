@@ -19,7 +19,7 @@ Exclude usernames, home paths, inventory databases, report JSON, notification sc
 
 ## Security model
 
-- No telemetry or upload of inventory/reports. User-initiated software updates contact GitHub Pages and GitHub Releases through Sparkle; source checkout/package resolution and signature timestamping also use the network.
+- No telemetry or upload of inventory/reports. Optional daily informational update checks contact GitHub Pages through Sparkle while the GUI is running; user-initiated downloads also contact GitHub Releases. These requests do not upload inventory/reports or system profiles; source checkout/package resolution and signature timestamping also use the network.
 - No shell interpolation for system commands
 - No root scanning helper, `sudo`-based installation, setuid executable, or LaunchDaemon. Sparkle may request administrator authorization to replace an application in a protected location.
 - User-domain LaunchAgent only

@@ -19,9 +19,15 @@ func updateConfigurationRequiresExplicitTrustedSource() {
     var config = valid
     config["SUPublicEDKey"] = "unset"
     #expect(!SoftwareUpdater.validConfiguration(config))
-    let updater = SoftwareUpdater(coordinator: nil)
+    let suite = "DailyDiskTests.Updater.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let updater = SoftwareUpdater(coordinator: nil, defaults: defaults)
     #expect(!updater.canCheck)
     #expect(updater.message != nil)
+    #expect(updater.responds(to: NSSelectorFromString("updaterShouldPromptForPermissionToCheckForUpdates:")))
+    updater.checkAutomaticallyIfDue()
+    #expect(updater.availableUpdate == nil)
 }
 
 @Test @MainActor
@@ -81,4 +87,24 @@ func failedOrCancelledCheckDoesNotRestoreStaleSettingsIntent() {
     presentation.beginCheck {}
     presentation.finishedCheck(noUpdate: true)
     #expect(!presentation.showsSettings)
+}
+
+@Test
+func downloadConsentIsSingleUseAndBoundToTheDisplayedBuild() {
+    var intent = UpdateDownloadIntent()
+    let unsolicited = intent.consume(matching: "21", notDownloaded: true)
+    #expect(!unsolicited)
+    intent.build = "21"
+    let changedTarget = intent.consume(matching: "22", notDownloaded: true)
+    #expect(!changedTarget)
+    let staleTarget = intent.consume(matching: "21", notDownloaded: true)
+    #expect(!staleTarget)
+    intent.build = "21"
+    let resumed = intent.consume(matching: "21", notDownloaded: false)
+    #expect(!resumed)
+    intent.build = "21"
+    let download = intent.consume(matching: "21", notDownloaded: true)
+    #expect(download)
+    let repeated = intent.consume(matching: "21", notDownloaded: true)
+    #expect(!repeated)
 }

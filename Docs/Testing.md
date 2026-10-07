@@ -199,6 +199,12 @@ Run `Scripts/test-update-config.sh` for disabled/default configuration and rejec
 
 These synthetic checks do not replace the signed two-version Sparkle acceptance matrix in Installation.md. Until a feed and public key are configured, no live update or notarized distribution acceptance is claimed.
 
+### Silent daily update discovery
+
+App regressions cover once-per-local-day attempt persistence across offline restarts, local midnight, clock rollback, disabled/busy suppression, manual throttle bypass, exclusive probe/manual cycles, stale callback isolation, bounded newer-build hints, feed/build invalidation, hint retention on network errors, and clearing on a successful no-update check. Download consent tests cover the exact displayed target, changed targets, resumed installation and one-use consumption. The permission-prompt delegate must expose Sparkle's actual Objective-C selector. Tests use private UserDefaults suites and synthetic versions, without network requests or app replacement.
+
+Before publishing this feature, real signed two-version acceptance must confirm: a compatible newer release produces only the in-app button; offline/no-update probes leave Settings, Dock badges and notifications unchanged; disabling daily checks survives restart; clicking Download Update closes any checking window, shows download progress and reaches the existing install/relaunch flow; changed targets require confirmation; an active scan/startup/cancellation/save hides the Overview update button, idle restores it, Settings disables it, and cancelling a pre-extraction download restores the prior task preference. Include a continuously running app across midnight and a quit/reopen catch-up. Synthetic tests and notarization do not establish these UI/installation results. No new isolated-installation workflow is required.
+
 ### Settings sheet / update termination regression
 
 App tests cover deferring the check until settings dismissal, exactly-once continuation, restoring settings after an acknowledged no-update cycle, leaving settings closed for a menu-origin check, and waiting for settings reopened during download before final installation. Network errors/cancellation must not carry stale restore intent into the next check.

@@ -97,7 +97,10 @@ final class AppController: ObservableObject {
     @Published private(set) var updatePreparation: UpdatePreparation?
     @Published private(set) var isPreparingUpdate = false
     private let updateCoordinator: UpdateCoordinator?
-    lazy var softwareUpdater = SoftwareUpdater(coordinator: updateCoordinator)
+    lazy var softwareUpdater = SoftwareUpdater(coordinator: updateCoordinator) { [weak self] in
+        guard let self else { return false }
+        return self.hasRefreshed && self.updatePreparation == nil && !self.isPreparingUpdate
+    }
 
     private let accessProbe: any FullDiskAccessProbing
     private let notificationManager: any NotificationAuthorizationManaging

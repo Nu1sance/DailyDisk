@@ -32,10 +32,23 @@ struct StatusView: View {
         .navigationTitle("概览")
         .navigationSubtitle(subtitle)
         .toolbar {
+            if !controller.scanState.isActive && controller.helperRuntimeStatus?.isRunning != true {
+                ToolbarItem(placement: .primaryAction) {
+                    AvailableSoftwareUpdateButton(
+                        updater: controller.softwareUpdater,
+                        blocked: controller.updatePreparation != nil || controller.isPreparingUpdate
+                            || !controller.hasRefreshed)
+                }
+            }
             ToolbarItem(placement: .primaryAction) {
                 if !controller.scanState.isActive {
                     Button(action: primaryAction) {
-                        Label(primaryTitle, systemImage: primaryIcon).labelStyle(.titleAndIcon)
+                        Label {
+                            Text(primaryTitle)
+                        } icon: {
+                            Image(systemName: primaryIcon).resizable().scaledToFit().frame(width: 16, height: 16)
+                        }
+                        .labelStyle(.titleAndIcon)
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(!controller.hasRefreshed || controller.isRefreshing)
