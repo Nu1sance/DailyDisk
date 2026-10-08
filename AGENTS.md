@@ -631,3 +631,8 @@ At build 20 publication, v0.2.5 provided notarized/stapled ZIP and DMG plus SHA-
 ### Silent update discovery release (0.2.6 build 21)
 
 Stable v0.2.6 packages daily informational update checks and the approved 16-point toolbar symbols. ZIP and DMG are Developer ID signed, notarized and stapled; both compatible appcasts and the Homebrew Tap use the same final ZIP while retaining old releases. Local 359-test results, release configuration/installer checks, source CI and public archive hash/signature/ticket checks passed. Real two-version acceptance of the new direct-download route, permission continuity and cross-midnight behavior remains separate from those results. Publication does not replace the local production app or start a scan.
+
+
+### Path disclosure release (0.2.7 build 22)
+
+Stable v0.2.7 packages bounded full-path selection/copy popovers for disclosed overview and history rankings. App and DMG are Developer ID signed, notarized and stapled. Stable/compatibility feeds and Homebrew use the same immutable final ZIP. No schema or scan-policy change is included. Local serial tests passed (359); the first parallel run had a real FSEvents burst-delivery assertion failure, retained in local release evidence. Package validation does not establish fresh-machine visual/accessibility or permission acceptance. Publication does not replace the local installed application.
