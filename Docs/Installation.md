@@ -1,6 +1,6 @@
 # Install from GitHub source
 
-DailyDisk provides MIT-licensed source and signed, notarized Apple Silicon stable archives (current release: 0.2.6 build 21; starting with 0.2.1 build 16) from [GitHub Releases](https://github.com/Nu1sance/DailyDisk/releases). The notarized release may still display the normal first-open confirmation; see [Apple’s guidance](https://support.apple.com/102445). This guide covers building from source. Other users do not need the author's signing certificate, database, or local configuration. The packaging script builds all three executables and installs the app. Developer-tool installation, local signing setup, and macOS privacy approvals remain manual.
+DailyDisk provides MIT-licensed source and signed, notarized Apple Silicon stable archives (current release: 0.2.7 build 22; starting with 0.2.1 build 16) from [GitHub Releases](https://github.com/Nu1sance/DailyDisk/releases). The notarized release may still display the normal first-open confirmation; see [Apple’s guidance](https://support.apple.com/102445). This guide covers building from source. Other users do not need the author's signing certificate, database, or local configuration. The packaging script builds all three executables and installs the app. Developer-tool installation, local signing setup, and macOS privacy approvals remain manual.
 
 ## Install with Homebrew
 

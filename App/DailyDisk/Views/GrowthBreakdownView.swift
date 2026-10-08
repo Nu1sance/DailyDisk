@@ -95,6 +95,7 @@ struct ChangeSourceList: View {
                 Text(signedBytes(source.allocatedDelta))
                     .font(.callout.weight(.semibold))
                     .monospacedDigit()
+                    .fixedSize()
             }
             GeometryReader { proxy in
                 ZStack(alignment: .leading) {
@@ -113,18 +114,8 @@ struct ChangeSourceList: View {
     @ViewBuilder
     private func label(_ source: RankedPathChange, _ index: Int) -> some View {
         if disclosePaths {
-            let path = reversibleDisplayPath(source.path)
-            VStack(alignment: .leading, spacing: 2) {
-                if let description = sourceDescription(source.path) {
-                    Text(description)
-                    Text(path).font(.caption.monospaced()).foregroundStyle(.secondary)
-                } else {
-                    Text(path).font(.callout.monospaced())
-                }
-            }
-            .lineLimit(2)
-            .truncationMode(.middle)
-            .textSelection(.enabled)
+            PathDisclosureView(
+                path: reversibleDisplayPath(source.path), description: sourceDescription(source.path))
         } else {
             Text("\(direction == .growth ? "增长" : "释放")来源 \(index + 1)")
                 + Text("  路径已隐藏").font(.caption).foregroundStyle(.secondary)

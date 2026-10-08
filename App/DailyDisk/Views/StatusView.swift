@@ -184,7 +184,9 @@ struct StatusView: View {
                         ChangeSourceList(
                             ranking: report.largestGrowth, includesAncestorRollups: report.pathRanking == nil,
                             direction: .growth,
-                            disclosePaths: controller.discloseReportPaths)
+                            disclosePaths: controller.discloseReportPaths
+                        )
+                        .id(report.reportIdentity)
                     }
                     .frame(maxWidth: .infinity)
                     VStack(spacing: 0) {
@@ -192,7 +194,9 @@ struct StatusView: View {
                         ChangeSourceList(
                             ranking: report.largestShrinkage, includesAncestorRollups: report.pathRanking == nil,
                             direction: .release,
-                            disclosePaths: controller.discloseReportPaths)
+                            disclosePaths: controller.discloseReportPaths
+                        )
+                        .id(report.reportIdentity)
                     }
                     .frame(minWidth: 220, maxWidth: 320)
                 }

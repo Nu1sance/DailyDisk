@@ -46,14 +46,18 @@ struct ReportDetailView: View {
                         ChangeSourceList(
                             ranking: report.largestGrowth, includesAncestorRollups: report.pathRanking == nil,
                             direction: .growth,
-                            disclosePaths: controller.discloseReportPaths)
+                            disclosePaths: controller.discloseReportPaths
+                        )
+                        .id(report.reportIdentity)
                     }
                     VStack(spacing: 0) {
                         SectionHeader("释放空间")
                         ChangeSourceList(
                             ranking: report.largestShrinkage, includesAncestorRollups: report.pathRanking == nil,
                             direction: .release,
-                            disclosePaths: controller.discloseReportPaths)
+                            disclosePaths: controller.discloseReportPaths
+                        )
+                        .id(report.reportIdentity)
                     }
                 }
                 details
@@ -260,14 +264,13 @@ struct ReportDetailView: View {
                 Text(title).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                 ForEach(Array(values.enumerated()), id: \.offset) { index, value in
                     HStack(alignment: .firstTextBaseline, spacing: 12) {
-                        Text(
-                            controller.discloseReportPaths
-                                ? reversibleDisplayPath(value.path) : "\(title)来源 \(index + 1) · 路径已隐藏"
-                        )
-                        .font(.callout.monospaced())
-                        .lineLimit(2)
-                        .truncationMode(.middle)
-                        .textSelection(.enabled)
+                        if controller.discloseReportPaths {
+                            PathDisclosureView(path: reversibleDisplayPath(value.path))
+                                .id("\(report.reportIdentity)-\(index)")
+                        } else {
+                            Text("\(title)来源 \(index + 1) · 路径已隐藏")
+                                .font(.callout).lineLimit(2)
+                        }
                         Spacer(minLength: 12)
                         Text("分配 \(bytes(value.allocatedDelta)) · 逻辑 \(bytes(value.logicalDelta))")
                             .font(.caption)

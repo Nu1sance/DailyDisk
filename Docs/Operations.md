@@ -226,3 +226,7 @@ Trend bars use blue for increases and gray for decreases; pointer selection chan
 ## Background connection failures
 
 “无法连接后台任务” is a general control-channel failure, not proof that the helper launched or that Full Disk Access was denied. Settings → Diagnostics shows the most recent failure stage and a path-free category/code; Copy Sanitized Diagnostics includes it even if database inspection is unavailable. Distinguish initialization, request, launch, observation, update-state and registration failures. Preserve helper exit/crash evidence when investigating another machine; do not reset Control files or history based on this message alone.
+
+## Viewing long paths
+
+After enabling path disclosure, click a truncated path in overview or history rankings to open its full text in a compact popover. Full paths can be selected or copied there; long content scrolls within a bounded area. The summary row stays two lines and does not expand on selection. Click outside, press Escape, or use the close button to dismiss. Hiding paths or changing reports closes the path popover. Its brief entrance animation respects Reduce Motion.
