@@ -94,8 +94,8 @@ struct ReportDetailView: View {
                 }
                 .labelStyle(.titleAndIcon)
                 .accessibilityValue(controller.discloseReportPaths ? "路径已显示" : "路径已隐藏")
-                .accessibilityHint(controller.discloseReportPaths ? "点击隐藏详细路径" : "点击确认在本次会话中显示详细路径")
-                .help(controller.discloseReportPaths ? "隐藏详细路径" : "在本次会话中显示详细路径")
+                .accessibilityHint(controller.discloseReportPaths ? "点击隐藏详细路径" : "点击确认在浏览历史期间显示详细路径")
+                .help(controller.discloseReportPaths ? "隐藏详细路径" : "在浏览历史期间显示详细路径")
                 Button {
                     confirmExport = true
                 } label: {
@@ -114,7 +114,7 @@ struct ReportDetailView: View {
             }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("路径可能包含用户名、项目名和文件名，只会在当前应用会话中显示。")
+            Text("路径可能包含用户名、项目名和文件名。切换历史日期时保持显示，返回概览后自动隐藏。")
         }
         .confirmationDialog(
             "导出包含完整路径的 JSON？",

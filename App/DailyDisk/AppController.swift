@@ -76,6 +76,7 @@ final class AppController: ObservableObject {
                 errorMessage = "这份报告已不存在，可能已重置历史。"
                 return
             }
+            setReportPathDisclosure(false)
             selectReport(report)
         } catch { errorMessage = "暂时无法读取这份报告，请稍后在历史中查看。" }
     }
@@ -446,7 +447,6 @@ final class AppController: ObservableObject {
 
     func selectReport(_ report: DailyReport) {
         selectedReport = report
-        discloseReportPaths = false
         if report.pathRanking == nil {
             Task {
                 do {

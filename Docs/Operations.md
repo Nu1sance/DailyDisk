@@ -219,7 +219,7 @@ The helper exposes the cancellable **正在核对已删除的文件** phase afte
 
 Hover over a scan column in the overview trend to see its report timestamp and signed physical change. A compact two-line overlay follows the pointer, stays within the chart bounds, and may overlap bars without reserving extra space, and its highlight fades briefly unless Reduce Motion is enabled. VoiceOver values remain available on each bar.
 
-The history toolbar shows current path visibility with text and an icon: “路径已隐藏” with eye.slash, or “路径已显示” with eye. Clicking the hidden state still requires confirmation before disclosing paths for the current session; hiding paths is immediate.
+The history toolbar shows current path visibility with text and an icon: “路径已隐藏” with eye.slash, or “路径已显示” with eye. Clicking the hidden state requires confirmation. Visibility is retained when selecting other dates within history. Switching between history and overview resets paths to hidden, as does opening a report from a notification. This state is not persisted across app launches; hiding paths is immediate.
 
 Trend bars use blue for increases and gray for decreases; pointer selection changes either sign to a soft lemon yellow adapted for light and dark appearance. Moving away restores the original color.
 

@@ -28,6 +28,11 @@ struct MainWindow: View {
                 HistoryView(controller: controller)
             }
         }
+        .onChange(of: section) { oldSection, newSection in
+            if (oldSection ?? .overview) != (newSection ?? .overview) {
+                controller.setReportPathDisclosure(false)
+            }
+        }
     }
 
     private var footer: some View {

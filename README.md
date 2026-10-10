@@ -122,9 +122,9 @@
 
 从 **[最新正式版](https://github.com/Nu1sance/DailyDisk/releases/latest)** 下载 Apple Silicon 安装包（DMG 或 ZIP），把 DailyDisk 拖进“应用程序”。
 
-正式版 **0.2.7（构建 22）** 已签名并通过 Apple 公证。首次打开时 macOS 仍可能请你确认下载来源。
+正式版 **0.2.8（构建 23）** 已签名并通过 Apple 公证。首次打开时 macOS 仍可能请你确认下载来源。
 
-旧版打开设置时闪退？从应用菜单发起 **检查更新…** 升级到 0.2.7，或重新下载安装包。
+旧版打开设置时闪退？从应用菜单发起 **检查更新…** 升级到 0.2.8，或重新下载安装包。
 
 </td>
 <td valign="top" width="50%">
