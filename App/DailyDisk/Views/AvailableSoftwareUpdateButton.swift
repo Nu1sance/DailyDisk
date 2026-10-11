@@ -2,22 +2,27 @@ import SwiftUI
 
 struct AvailableSoftwareUpdateButton: View {
     @ObservedObject var updater: SoftwareUpdater
-    var blocked: Bool
+    var blockedReason: String?
 
     var body: some View {
         if let update = updater.availableUpdate {
-            Button(action: updater.downloadAvailableUpdate) {
-                Label {
-                    Text("下载更新")
-                } icon: {
-                    Image(systemName: "arrow.down.circle").resizable().scaledToFit().frame(width: 16, height: 16)
+            HStack(spacing: 0) {
+                Button(action: updater.downloadAvailableUpdate) {
+                    Label {
+                        Text("下载更新")
+                    } icon: {
+                        Image(systemName: "arrow.down.circle").resizable().scaledToFit().frame(width: 16, height: 16)
+                    }
+                    .labelStyle(.titleAndIcon)
                 }
-                .labelStyle(.titleAndIcon)
+                .buttonStyle(.bordered)
+                .disabled(blockedReason != nil || !updater.canCheck)
+                .accessibilityLabel("下载更新至 \(update.version)")
+                .accessibilityHint(blockedReason ?? (!updater.canCheck ? "正在检查更新或处理更新操作，请稍候。" : ""))
             }
-            .buttonStyle(.bordered)
-            .disabled(blocked || !updater.canCheck)
-            .help(blocked ? "当前任务结束或安装状态恢复后可更新" : "更新至 \(update.version)")
-            .accessibilityLabel("下载更新至 \(update.version)")
+            // Help belongs to an enabled container so it also works over the disabled button.
+            .contentShape(Rectangle())
+            .help(blockedReason ?? (!updater.canCheck ? "正在检查更新或处理更新操作，请稍候。" : "更新至 \(update.version)"))
         }
     }
 }

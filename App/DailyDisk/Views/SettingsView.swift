@@ -12,9 +12,7 @@ struct SettingsView: View {
             Section("软件更新") {
                 SoftwareUpdateSettings(
                     updater: controller.softwareUpdater,
-                    blocked: controller.scanState.isActive || controller.helperRuntimeStatus?.isRunning == true
-                        || controller.updatePreparation != nil || controller.isPreparingUpdate
-                        || !controller.hasRefreshed)
+                    blockedReason: controller.softwareUpdateBlockReason)
                 LabeledContent("版本", value: "\(DailyDiskProduct.version) (\(DailyDiskProduct.installedBuildNumber))")
                 if controller.updatePreparation != nil {
                     Text(updatePreparationMessage)
@@ -209,7 +207,7 @@ struct SettingsView: View {
 
 private struct SoftwareUpdateSettings: View {
     @ObservedObject var updater: SoftwareUpdater
-    var blocked: Bool
+    var blockedReason: String?
     var body: some View {
         if updater.isConfigured {
             Toggle(
@@ -220,7 +218,7 @@ private struct SoftwareUpdateSettings: View {
                 .font(.caption).foregroundStyle(.secondary)
             if let update = updater.availableUpdate {
                 LabeledContent("可用版本", value: update.version)
-                AvailableSoftwareUpdateButton(updater: updater, blocked: blocked)
+                AvailableSoftwareUpdateButton(updater: updater, blockedReason: blockedReason)
             }
         }
         CheckForSoftwareUpdates(updater: updater)

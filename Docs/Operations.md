@@ -230,3 +230,10 @@ Trend bars use blue for increases and gray for decreases; pointer selection chan
 ## Viewing long paths
 
 After enabling path disclosure, click a truncated path in overview or history rankings to open its full text in a compact popover. Full paths can be selected or copied there; long content scrolls within a bounded area. The summary row stays two lines and does not expand on selection. Click outside, press Escape, or use the close button to dismiss. Hiding paths or changing reports closes the path popover. Its brief entrance animation respects Reduce Motion.
+
+
+### Update availability while tasks finish
+
+A discovered update stays visible in the overview toolbar. During scans, saving, helper shutdown or installation preparation, its button is disabled and an enabled outer hover target supplies a native help tooltip explaining the wait; the same reason is available to accessibility. Sparkle cycles also disable the button with an explanation. The installer retains its existing final safety checks.
+
+GUI progress polling continues rate-limited helper status checks after the Control request disappears, until the helper is confirmed stopped. A failed status probe preserves the previous running state and retries on a later ordinary GUI poll. Once stopped, idle polling does not repeatedly invoke launchctl. This only observes the helper; it never launches or retries scans. Regression coverage includes terminal progress before actual process exit, throttled checks, and stopping probes after exit.

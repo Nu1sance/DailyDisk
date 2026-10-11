@@ -38,6 +38,10 @@ private final class AppRegistrationService: LaunchAgentRegistrationServicing, @u
 
 private actor AppLaunchctlProbe: ProcessRunning {
     private(set) var requests: [ProcessRequest] = []
+    private var failRuntimeProbe = false
+    func setProbeFailure(_ value: Bool) { failRuntimeProbe = value }
+    private var simulatedRunning = false
+    func setRunning(_ value: Bool) { simulatedRunning = value }
     private let pauseKickstart: Bool
     private var continuation: CheckedContinuation<Void, Never>?
 
@@ -50,12 +54,13 @@ private actor AppLaunchctlProbe: ProcessRunning {
 
     func run(_ request: ProcessRequest) async throws -> ProcessResult {
         requests.append(request)
+        if failRuntimeProbe && request.arguments.first == "print" { throw URLError(.timedOut) }
         if pauseKickstart, request.arguments.first == "kickstart" {
             await withCheckedContinuation { continuation = $0 }
         }
         let output =
             request.arguments.first == "print"
-            ? Data("state = exited\nlast exit code = 0\n".utf8)
+            ? Data((simulatedRunning ? "state = running\npid = 12345\n" : "state = exited\nlast exit code = 0\n").utf8)
             : Data()
         return ProcessResult(
             terminationStatus: 0,
@@ -76,7 +81,8 @@ private func appControlRoot() -> URL {
 private func makeController(
     control: RunControlStore,
     databaseURL: URL,
-    process: AppLaunchctlProbe = AppLaunchctlProbe()
+    process: AppLaunchctlProbe = AppLaunchctlProbe(),
+    now: @escaping @Sendable () -> Date = Date.init
 ) -> AppController {
     AppController(
         accessProbe: AppAccessProbe(),
@@ -90,7 +96,7 @@ private func makeController(
         ),
         controlStore: control,
         inspectionService: RuntimeInspectionService(databaseURL: databaseURL),
-        pollingInterval: .seconds(60)
+        pollingInterval: .seconds(60), now: now
     )
 }
 
@@ -505,4 +511,63 @@ func guiUnreadReportBadges() async throws {
     await controller.markAllReportsRead()
     #expect(await probe.counts.last == 0)
     #expect(try await control.notificationState().unread.isEmpty)
+}
+
+@Test("Terminal polling follows helper exit and then stops idle runtime probes")
+@MainActor
+func terminalPollingReleasesUpdateGate() async throws {
+    let root = appControlRoot()
+    defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent()) }
+    let control = try RunControlStore(rootURL: root)
+    let process = AppLaunchctlProbe()
+    let clock = AppTestClock()
+    let controller = makeController(
+        control: control, databaseURL: root.deletingLastPathComponent().appendingPathComponent("missing.sqlite"),
+        process: process, now: { clock.now() })
+    let request = try DailyDiskRunRequest(createdAt: Date())
+    try await control.enqueue(request)
+    _ = try await control.claimPendingRequest()
+    await process.setRunning(true)
+    await controller.refreshScanState()
+    #expect(controller.helperRuntimeStatus?.isRunning == true)
+    for phase in [
+        ScanProgressPhase.preparing, .discoveringStorage, .replayingEvents, .catchingUpEvents, .sealingInventory,
+        .collectingDiagnostics, .committing, .publishingReport,
+    ] {
+        await control.publish(
+            try ScanProgressSnapshot(
+                requestID: request.requestID, trigger: .manual, mode: .incremental, phase: phase,
+                startedAt: request.createdAt, updatedAt: Date()))
+    }
+    let summary = try DailyDiskRunSummary(
+        requestID: request.requestID, trigger: .manual, terminalState: .succeeded, startedAt: request.createdAt,
+        finishedAt: Date(), completedDomainCount: 1, failedDomainCount: 0, reportRunIDs: [])
+    try await control.complete(summary)
+    await controller.refreshScanState()
+    #expect(!controller.scanState.isActive)
+    #expect(controller.softwareUpdateBlockReason != nil)
+    clock.advance(4)
+    await controller.refreshScanState()
+    #expect(controller.helperRuntimeStatus?.isRunning == true)
+    let checksBeforeExit = await process.requests.count
+    await process.setRunning(false)
+    await controller.refreshScanState()
+    #expect(await process.requests.count == checksBeforeExit)
+    await process.setProbeFailure(true)
+    clock.advance(4)
+    await controller.refreshScanState()
+    #expect(controller.helperRuntimeStatus?.isRunning == true)
+    #expect(controller.softwareUpdateBlockReason != nil)
+    await process.setProbeFailure(false)
+    clock.advance(4)
+    await controller.refreshScanState()
+    #expect(controller.helperRuntimeStatus?.isRunning == false)
+    let checksAfterExit = await process.requests.count
+    for _ in 0..<5 {
+        clock.advance(4)
+        await controller.refreshScanState()
+    }
+    #expect(await process.requests.count == checksAfterExit)
+    await controller.refresh()
+    #expect(controller.softwareUpdateBlockReason == nil)
 }

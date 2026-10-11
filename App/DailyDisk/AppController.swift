@@ -98,6 +98,14 @@ final class AppController: ObservableObject {
     @Published private(set) var updatePreparation: UpdatePreparation?
     @Published private(set) var isPreparingUpdate = false
     private let updateCoordinator: UpdateCoordinator?
+    var softwareUpdateBlockReason: String? {
+        if scanState.isActive { return "正在检查或保存结果，任务结束后可更新。" }
+        if helperRuntimeStatus?.isRunning == true { return "后台任务正在收尾，退出后可更新。" }
+        if updatePreparation != nil || isPreparingUpdate { return "正在准备安装或等待恢复运行，请先完成当前操作。" }
+        if !hasRefreshed { return "正在读取应用状态，请稍候。" }
+        return nil
+    }
+
     lazy var softwareUpdater = SoftwareUpdater(coordinator: updateCoordinator) { [weak self] in
         guard let self else { return false }
         return self.hasRefreshed && self.updatePreparation == nil && !self.isPreparingUpdate
@@ -329,16 +337,23 @@ final class AppController: ObservableObject {
             let progress = try await controlStore.latestProgress()
             let cancellation = try await controlStore.cancellationRequest()
             guard allowDuringSubmission || !isSubmittingScanRequest else { return }
+            // Keep observing a finishing helper after its Control request disappears.
+            // Retain the last state on probe failure so a transient error cannot unlock updates.
+            if active != nil || pending != nil || helperRuntimeStatus?.isRunning != false,
+                now().timeIntervalSince(lastHelperCheck) >= 3
+            {
+                if let runtime = try? await launchAgentManager.runtimeStatus() {
+                    helperRuntimeStatus = runtime
+                }
+                launchAgentStatus = await launchAgentManager.status()
+                lastHelperCheck = now()
+            }
+            guard allowDuringSubmission || !isSubmittingScanRequest else { return }
             if let request = active ?? pending {
                 trackedRequestID = request.requestID
                 if observedRequestID != request.requestID {
                     observedRequestID = request.requestID
                     observedRequestAt = now()
-                }
-                if now().timeIntervalSince(lastHelperCheck) >= 3 {
-                    helperRuntimeStatus = try? await launchAgentManager.runtimeStatus()
-                    launchAgentStatus = await launchAgentManager.status()
-                    lastHelperCheck = now()
                 }
                 guard allowDuringSubmission || !isSubmittingScanRequest else { return }
                 let updatedAt =
