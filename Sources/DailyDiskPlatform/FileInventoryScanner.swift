@@ -107,13 +107,32 @@ public struct FileInventoryScanner: FileInventoryScanning {
         observer: any ScanWorkObserving,
         consume: @escaping @Sendable (InventoryRecordBatch) async throws -> Void
     ) async throws -> InventoryScanResult {
-        try await scanInternal(
-            volume: volume,
-            root: root,
-            runID: runID,
-            observer: observer,
-            consume: consume
-        )
+        do {
+            return try await scanInternal(
+                volume: volume, root: root, runID: runID, observer: observer, consume: consume)
+        } catch FileInventoryScannerError.subtreeOpenFailed(let path, let code)
+            where configuration.maximumUnreadablePaths > 0 && (code == EACCES || code == EPERM || code == EDEADLK)
+        {
+            try await observer.checkpoint(ScanProgressDelta(unreadablePaths: 1))
+            return InventoryScanResult(
+                coverage: ScanCoverage(
+                    visitedPathCount: 0, indexedObjectCount: 0, unreadablePathCount: 1, transientErrorCount: 0),
+                errors: [
+                    ScanErrorRecord(
+                        runID: runID, volumeID: volume.id,
+                        kind: code == EDEADLK ? .contentUnavailable : .permissionDenied,
+                        path: path, errorCode: code, message: "Subtree unavailable; previous inventory preserved")
+                ])
+        } catch FileInventoryScannerError.incomplete(let result) {
+            // Small subtrees may be entirely opaque: the full-volume percentage limit
+            // is not meaningful here. Never tolerate omitted diagnostics or hard I/O errors.
+            let opaque = result.errors.filter { $0.kind.preservesOpaqueInventory && $0.path != nil }
+            guard result.coverage.unreadablePathCount <= configuration.maximumUnreadablePaths,
+                UInt64(opaque.count) == result.coverage.unreadablePathCount,
+                result.errors.allSatisfy({ $0.kind.preservesOpaqueInventory || $0.kind == .disappearedDuringScan })
+            else { throw FileInventoryScannerError.incomplete(result) }
+            return result
+        }
     }
 
     private func scanInternal(
@@ -355,6 +374,16 @@ private final class ScannerWalker: @unchecked Sendable {
         }
         do {
             for component in path.bytes.split(separator: UInt8(ascii: "/"), omittingEmptySubsequences: false) {
+                var componentStatus = Darwin.stat()
+                let metadataResult = withNullTerminatedBytes(Data(component)) { pointer in
+                    retryInterruptedPOSIX { fstatat(currentFD, pointer, &componentStatus, AT_SYMLINK_NOFOLLOW) }
+                }
+                guard metadataResult == 0 else {
+                    throw FileInventoryScannerError.subtreeOpenFailed(path: path, code: errno)
+                }
+                if componentStatus.st_flags & UInt32(SF_DATALESS) != 0 {
+                    throw FileInventoryScannerError.subtreeOpenFailed(path: path, code: EDEADLK)
+                }
                 let nextFD = withNullTerminatedBytes(Data(component)) { pointer in
                     retryInterruptedPOSIX {
                         openat(currentFD, pointer, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)

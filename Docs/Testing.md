@@ -222,3 +222,14 @@ Synthetic tests resolve resource fixtures from GUI and both helper executable lo
 Synthetic coverage must include signed positive/negative/zero/baseline summaries, path-free content, exact run sample lookup, manual and scheduled enqueue, fallback's final report only, terminal-summary restart, concurrent GUI read/helper enqueue, cross-process claim and preference updates, bounded inbox, reset, disabled banners with badge-only updates, legacy payloads and invalid badge counts, unsafe state links/JSON, and delivery failure isolation. Do not send real system notifications in unit tests.
 
 Signed installed-app acceptance (not proven by unit tests): grant/update alert/sound/badge permissions; use Settings' test button without scanning; inspect native banners and sound choice; complete one normal scheduled/manual run, including GUI foreground/background/closed and closed-window states; verify actual Dock badge count, reading one report and mark-all-read, disabling badges, cold/warm notification click routing and hidden paths. Denied permissions/Focus must leave saved reports usable and must not trigger retries. Inspect an app outside the build tree; no Bundle.module fallback or new signing identity is permitted. Subsequent distribution requires a new versioned signed/notarized package; do not overwrite build 19.
+
+Opaque catch-up regressions (`opaqueSubtreeReplayPreservesInventory`,
+`newOpaqueDirectoryHasMetadataOnly`, `dailyFullPreservesCatchupOpaqueDirectory`,
+and `subtreeReconcile*`) use synthetic temporary trees and stores. They cover
+permission loss after full traversal with a successful trusted commit, partial
+readability, preservation of newer overlay observations, restored permissions,
+replacement ambiguity and rollback. Run the POSIX permission cases as a normal
+user, not root. The 6,000-record unchanged-subtree case forces bounded scratch
+spill and verifies zero inventory mutation rows, with a comparison against the
+previous delete/reinsert strategy. Its timings are a local regression signal,
+not a guarantee of whole-disk scan time or physical SSD writes.

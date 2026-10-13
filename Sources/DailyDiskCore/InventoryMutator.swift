@@ -100,6 +100,7 @@ public actor IncrementalInventoryMutator {
                         message: "Content could not be read; preserved previous opaque inventory state"
                     )
                 )
+                if event.flags.contains(.mustScanSubdirectories) { repairedSubtreeRequirements += 1 }
                 continue
             }
             let current: InventoryRecord? = if case .record(let record) = readResult { record } else { nil }
@@ -172,7 +173,7 @@ public actor IncrementalInventoryMutator {
                 && (current == nil
                     || current?.object.kind != .directory
                     || current?.object.identity != previous?.object.identity)
-            if directoryIdentityChanged {
+            if directoryIdentityChanged && current?.object.kind != .directory {
                 try await store.stageRemovalSubtree(
                     root: event.path,
                     target: target,
@@ -221,31 +222,29 @@ public actor IncrementalInventoryMutator {
                     || event.flags.contains(.renamed)
                     || directoryIdentityChanged)
             if needsSubtree {
-                try await store.stageRemovalSubtree(
-                    root: event.path,
-                    target: target,
-                    for: runID,
-                    observer: observer
-                )
-                let result = try await subtreeScanner.scanSubtree(
-                    volume: volume,
-                    root: event.path,
-                    runID: runID,
-                    observer: observer
-                ) { records in
-                    try await self.store.stage(
-                        mutations: records.records.map(InventoryMutation.upsert),
-                        target: target,
-                        for: runID
-                    )
+                let result = try await store.reconcileSubtree(
+                    root: event.path, target: target, for: runID, observer: observer
+                ) { consume in
+                    let result = try await self.subtreeScanner.scanSubtree(
+                        volume: volume, root: event.path, runID: runID, observer: observer, consume: consume)
+                    // An unreadable replacement must not inherit the old directory's children.
+                    if directoryIdentityChanged && result.coverage.unreadablePathCount > 0 {
+                        throw IncrementalMutationError.incompleteSubtree
+                    }
+                    return result
                 }
                 if affectedEventPaths.insert(event.path).inserted {
                     affected += 1
                     try await observer.checkpoint(ScanProgressDelta(affectedPaths: 1))
                 }
                 scanErrors.append(contentsOf: result.errors)
-                if result.coverage.unreadablePathCount > 0 {
-                    throw IncrementalMutationError.incompleteSubtree
+                if previous == nil,
+                    result.errors.contains(where: {
+                        $0.kind.preservesOpaqueInventory && $0.path == event.path
+                    })
+                {
+                    // stat succeeded even though opening the new directory did not.
+                    try await store.stage(mutations: [.upsert(current)], target: target, for: runID)
                 }
                 if event.flags.contains(.mustScanSubdirectories) {
                     repairedSubtreeRequirements += 1

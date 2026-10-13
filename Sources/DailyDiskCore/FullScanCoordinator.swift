@@ -419,6 +419,16 @@ public struct FullScanCoordinator: Sendable {
                     lastSuccessfulIncrementalAt: previousState?.checkpoint.lastSuccessfulIncrementalAt,
                     lastSuccessfulFullScanAt: finishedAt
                 )
+                let allScanErrors = await progress.scanErrors
+                let unreadableRoots = Set(
+                    allScanErrors.compactMap { error in
+                        error.kind.preservesOpaqueInventory ? error.path : nil
+                    })
+                let finalCoverage = ScanCoverage(
+                    visitedPathCount: fullResult.coverage.visitedPathCount,
+                    indexedObjectCount: fullResult.coverage.indexedObjectCount,
+                    unreadablePathCount: max(fullResult.coverage.unreadablePathCount, UInt64(unreadableRoots.count)),
+                    transientErrorCount: fullResult.coverage.transientErrorCount)
                 let commit = try ScanCommit(
                     runID: run.id,
                     runKind: runKind,
@@ -433,8 +443,8 @@ public struct FullScanCoordinator: Sendable {
                     snapshotSamples: diagnosticSamples.snapshots,
                     snapshotObservedVolumeIDs: diagnosticSamples.observedVolumeIDs,
                     overheadSample: diagnosticSamples.overhead,
-                    coverage: fullResult.coverage,
-                    scanErrors: await progress.scanErrors,
+                    coverage: finalCoverage,
+                    scanErrors: allScanErrors,
                     comparesSnapshots: comparesSnapshots,
                     reusesActiveInventory: reusesInventory
                 )
@@ -449,11 +459,11 @@ public struct FullScanCoordinator: Sendable {
                     checkpoint: newCheckpoint,
                     reconciliation: reconciliation,
                     storageSample: sample,
-                    coverage: fullResult.coverage,
+                    coverage: finalCoverage,
                     snapshotSamples: diagnosticSamples.snapshots,
                     snapshotObservedVolumeIDs: diagnosticSamples.observedVolumeIDs,
                     overheadSample: diagnosticSamples.overhead,
-                    scanErrors: await progress.scanErrors
+                    scanErrors: allScanErrors
                 )
             } catch {
                 ScanProbe.emit(

@@ -237,3 +237,11 @@ After enabling path disclosure, click a truncated path in overview or history ra
 A discovered update stays visible in the overview toolbar. During scans, saving, helper shutdown or installation preparation, its button is disabled and an enabled outer hover target supplies a native help tooltip explaining the wait; the same reason is available to accessibility. Sparkle cycles also disable the button with an explanation. The installer retains its existing final safety checks.
 
 GUI progress polling continues rate-limited helper status checks after the Control request disappears, until the helper is confirmed stopped. A failed status probe preserves the previous running state and retries on a later ordinary GUI poll. Once stopped, idle polling does not repeatedly invoke launchctl. This only observes the helper; it never launches or retries scans. Regression coverage includes terminal progress before actual process exit, throttled checks, and stopping probes after exit.
+
+### Permission loss during event catch-up
+
+An inaccessible temporary directory during the post-traversal event replay no longer aborts an otherwise valid scan solely because of `EACCES`/`EPERM`. Provider-unavailable (`EDEADLK`) subtrees receive the same opaque treatment. The report records the coverage gap, including when it first appears during catch-up.
+
+DailyDisk retains the latest known records beneath unreadable roots and removes only paths whose absence was established outside those roots. This prevents false space-release entries. Retained sizes can be stale; an unreadable new directory has no inferred contents. A later successful subtree scan or the next daily full scan reconciles those paths once access returns. Full Disk Access still does not override POSIX/ACL/SIP restrictions.
+
+This does not suppress journal loss, hard I/O errors, unsafe mount changes, incomplete diagnostics, or an unreadable replacement directory with a different identity. Those conditions still fail safely without advancing the committed checkpoint. Small subtree rescans use bounded path tracking and skip writes for unchanged records; they do not copy the complete old subtree before scanning.

@@ -663,6 +663,16 @@ public protocol InventoryStoring: Sendable {
         observer: any ScanWorkObserving
     ) async throws
 
+    /// Reconcile only paths proven absent by a subtree scan. Opaque descendants retain
+    /// their pre-existing overlay records; partial scans must never pre-delete the tree.
+    func reconcileSubtree(
+        root: RelativePath, target: InventoryMutationTarget, for runID: ScanRun.ID,
+        observer: any ScanWorkObserving,
+        scan:
+            @Sendable (@escaping @Sendable (InventoryRecordBatch) async throws -> Void) async throws ->
+            InventoryScanResult
+    ) async throws -> InventoryScanResult
+
     /// Copies one sealed-boundary filesystem mutation plan between run targets
     /// without re-reading the live filesystem.
     func copyMutations(

@@ -1740,3 +1740,169 @@ func dailyFullRejectsScanTimeLoss(cancel: Bool) async throws {
     #expect(try await fixture.store.state(for: fixture.volume.id)?.checkpoint == fixture.baselineCheckpoint)
     #expect(try await fixture.store.activeRuns().isEmpty)
 }
+
+@Test(
+    "Opaque subtree replay preserves overlay history and recovers after permissions return", arguments: [false, true])
+func opaqueSubtreeReplayPreservesInventory(rootDenied: Bool) async throws {
+    let fixture = try await IncrementalFixture.make()
+    defer { fixture.remove() }
+    let run = ScanRun(kind: .incremental, reason: .manual, status: .running, startedAt: Date())
+    try await fixture.store.begin(run: run)
+    let target = InventoryMutationTarget.expectedActive(volumeID: fixture.volume.id)
+    let path = try RelativePath(validating: "directory/subdirectory/nested-file")
+    let metadata = POSIXFileMetadataReader(
+        diskArbitration: IncrementalMountProvider(volume: fixture.volume), managedAbsolutePaths: [])
+    // Preserve this run's newer observation, not just yesterday's baseline.
+    try Data(repeating: 7, count: 8192).write(to: fixture.root.appendingPathComponent(path.displayString))
+    guard case .record(let newer) = try await metadata.read(volume: fixture.volume, path: path) else {
+        Issue.record("Missing fixture metadata")
+        return
+    }
+    try await fixture.store.stage(mutations: [.upsert(newer)], target: target, for: run.id)
+    let protected = fixture.root.appendingPathComponent(rootDenied ? "directory" : "directory/subdirectory")
+    #expect(chmod(protected.path, 0) == 0)
+    defer { chmod(protected.path, S_IRWXU) }
+    let mutator = IncrementalInventoryMutator(
+        store: fixture.store, metadataReader: metadata,
+        subtreeScanner: FileInventoryScanner(
+            configuration: try FileInventoryScannerConfiguration(
+                managedAbsolutePaths: [], validateMountIdentity: false)))
+    let event = FileSystemEvent(
+        id: 11, volumeID: fixture.volume.id,
+        path: try RelativePath(validating: "directory"), flags: [.isDirectory, .mustScanSubdirectories])
+    let result = try await mutator.apply(
+        batch: EventBatch(events: [event]), volume: fixture.volume,
+        target: target, runID: run.id)
+    #expect(result.scanErrors.contains { $0.kind == .permissionDenied })
+    #expect(result.repairedSubtreeRequirementCount == 1)
+    #expect(try await fixture.store.records(target: target, runID: run.id, paths: [path]) == [newer])
+    #expect(try await fixture.store.state(for: fixture.volume.id)?.checkpoint == fixture.baselineCheckpoint)
+    #expect(chmod(protected.path, S_IRWXU) == 0)
+    try FileManager.default.removeItem(at: fixture.root.appendingPathComponent(path.displayString))
+    _ = try await mutator.apply(
+        batch: EventBatch(events: [event]), volume: fixture.volume, target: target, runID: run.id)
+    #expect(try await fixture.store.records(target: target, runID: run.id, paths: [path]).isEmpty)
+    try await fixture.store.interrupt(runID: run.id, finishedAt: Date())
+    #expect(try await fixture.store.state(for: fixture.volume.id)?.checkpoint == fixture.baselineCheckpoint)
+}
+
+@Test("A new unreadable directory retains known metadata without invented children")
+func newOpaqueDirectoryHasMetadataOnly() async throws {
+    let fixture = try await IncrementalFixture.make()
+    defer { fixture.remove() }
+    let directory = fixture.root.appendingPathComponent("new-opaque")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    try Data("unreadable".utf8).write(to: directory.appendingPathComponent("hidden"))
+    #expect(chmod(directory.path, 0) == 0)
+    defer { chmod(directory.path, S_IRWXU) }
+    let run = ScanRun(kind: .incremental, reason: .manual, status: .running, startedAt: Date())
+    try await fixture.store.begin(run: run)
+    let target = InventoryMutationTarget.expectedActive(volumeID: fixture.volume.id)
+    let path = try RelativePath(validating: "new-opaque")
+    let mutator = IncrementalInventoryMutator(
+        store: fixture.store,
+        metadataReader: POSIXFileMetadataReader(
+            diskArbitration: IncrementalMountProvider(volume: fixture.volume), managedAbsolutePaths: []),
+        subtreeScanner: FileInventoryScanner(
+            configuration: try FileInventoryScannerConfiguration(managedAbsolutePaths: [], validateMountIdentity: false)
+        ))
+    let result = try await mutator.apply(
+        batch: EventBatch(events: [
+            FileSystemEvent(
+                id: 11, volumeID: fixture.volume.id,
+                path: path, flags: [.created, .isDirectory])
+        ]), volume: fixture.volume, target: target, runID: run.id)
+    #expect(result.scanErrors.contains { $0.kind == .permissionDenied })
+    let records = try await fixture.store.records(
+        target: target, runID: run.id,
+        paths: [path, RelativePath(validating: "new-opaque/hidden")])
+    #expect(records.count == 1)
+    #expect(records.first?.object.kind == .directory)
+    try await fixture.store.interrupt(runID: run.id, finishedAt: Date())
+}
+
+@Test("Daily full commits trusted catch-up with a newly inaccessible directory")
+func dailyFullPreservesCatchupOpaqueDirectory() async throws {
+    let fixture = try await IncrementalFixture.make()
+    defer {
+        chmod(fixture.root.appendingPathComponent("directory").path, S_IRWXU)
+        fixture.remove()
+    }
+    let livePath = try RelativePath(validating: "directory")
+    let liveEvent = FileSystemEvent(
+        id: 11,
+        volumeID: fixture.volume.id,
+        path: livePath,
+        flags: [.mustScanSubdirectories, .isDirectory]
+    )
+    let session = FakeEventSession(
+        historical: [],
+        live: [try EventBatch(events: [liveEvent])],
+        historyFence: EventCursorFence(
+            volumeID: fixture.volume.id,
+            eventStoreUUID: fixture.eventStoreUUID,
+            highestFullyDeliveredEventID: 10,
+            phase: .historyDone,
+            trust: .trusted
+        ),
+        liveFence: EventCursorFence(
+            volumeID: fixture.volume.id,
+            eventStoreUUID: fixture.eventStoreUUID,
+            highestFullyDeliveredEventID: 11,
+            phase: .liveFlush,
+            trust: .trusted
+        )
+    )
+    let baseScanner = FileInventoryScanner(
+        configuration: try FileInventoryScannerConfiguration(
+            managedAbsolutePaths: [],
+            validateMountIdentity: false
+        )
+    )
+    let racingScanner = RacingFileScanner(base: baseScanner) {
+        #expect(await session.stopCount == 1)
+        #expect(chmod(fixture.root.appendingPathComponent("directory").path, 0) == 0)
+    }
+    let sample = try StorageSample(
+        storageDomainID: fixture.scope.domain.id,
+        sampledAt: Date(timeIntervalSince1970: 20),
+        capacityBytes: 1_000_000,
+        usedBytes: 100_100,
+        availableBytes: 899_900
+    )
+    let coordinator = FullScanCoordinator(
+        store: fixture.store,
+        eventReader: FakeEventReader(session: session),
+        metadataReader: POSIXFileMetadataReader(
+            diskArbitration: IncrementalMountProvider(volume: fixture.volume),
+            managedAbsolutePaths: []
+        ),
+        fullScanner: racingScanner,
+        diskUsageSampler: FakeDiskSampler(sampleValue: sample),
+        volumeDiscovery: StaticVolumeDiscovery(
+            topology: VolumeTopology(
+                domains: [fixture.scope.domain],
+                volumes: [fixture.volume],
+                discoveredAt: Date(timeIntervalSince1970: 20)
+            )
+        ),
+        clock: AdvancingClock(Date(timeIntervalSince1970: 20))
+    )
+    let outcome = try await coordinator.run(
+        volume: fixture.volume,
+        scope: fixture.scope,
+        mode: .daily
+    )
+
+    #expect(outcome.coverage.unreadablePathCount == 1)
+    #expect(outcome.scanErrors.contains { $0.kind == .permissionDenied })
+    let state = try await fixture.store.state(for: fixture.volume.id)
+    #expect(state?.checkpoint.lastCommittedEventID == 11)
+    let run = ScanRun(kind: .incremental, reason: .manual, status: .running, startedAt: Date())
+    try await fixture.store.begin(run: run)
+    let records = try await fixture.store.records(
+        target: .expectedActive(volumeID: fixture.volume.id), runID: run.id,
+        paths: [RelativePath(validating: "directory/subdirectory/nested-file")])
+    #expect(records.count == 1)
+    try await fixture.store.interrupt(runID: run.id, finishedAt: Date())
+}

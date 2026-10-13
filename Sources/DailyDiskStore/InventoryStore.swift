@@ -526,6 +526,89 @@ public actor SQLiteInventoryStore: InventoryStoring {
         }
     }
 
+    public func reconcileSubtree(
+        root: RelativePath, target: InventoryMutationTarget, for runID: ScanRun.ID,
+        observer: any ScanWorkObserving,
+        scan:
+            @Sendable (@escaping @Sendable (InventoryRecordBatch) async throws -> Void) async throws ->
+            InventoryScanResult
+    ) async throws -> InventoryScanResult {
+        try requireRunningRun(runID)
+        let descriptor = try resolve(target: target, runID: runID)
+        let seen = SubtreeSeenPaths()
+        let replacedDirectories = SubtreeSeenPaths()
+        let result = try await scan { batch in
+            try await self.observeSubtree(
+                batch, root: root, target: target, runID: runID, seen: seen, replacedDirectories: replacedDirectories)
+        }
+        let opaqueErrors = result.errors.filter { $0.kind.preservesOpaqueInventory }
+        guard
+            opaqueErrors.allSatisfy({ error in
+                error.path.map { PathPolicy.isEqual($0, orDescendantOf: root) } == true
+            }), UInt64(opaqueErrors.count) == result.coverage.unreadablePathCount,
+            result.errors.allSatisfy({ $0.kind.preservesOpaqueInventory || $0.kind == .disappearedDuringScan })
+        else { throw IncrementalMutationError.incompleteSubtree }
+        // Never graft children of an old directory onto a replacement we cannot read.
+        for path in opaqueErrors.compactMap(\.path) {
+            for ancestor in [path] + PathPolicy.ancestors(of: path) {
+                if try replacedDirectories.contains(ancestor) {
+                    throw IncrementalMutationError.incompleteSubtree
+                }
+            }
+        }
+        let opaque = OpaquePathIndex(opaqueErrors.compactMap(\.path))
+        var after: RelativePath?
+        while true {
+            try await observer.checkpoint()
+            try requireRunningRun(runID)
+            let page = try loadOverlayPage(
+                descriptor: descriptor, runID: runID, after: after,
+                limit: InventoryRecordBatch.maximumRecordCount, within: root)
+            guard !page.isEmpty else { break }
+            after = page.last?.path.relativePath
+            var removals: [InventoryMutation] = []
+            for record in page {
+                let path = record.path.relativePath
+                if !opaque.contains(path.bytes), try !seen.contains(path) {
+                    removals.append(.remove(volumeID: descriptor.volumeID, path: path))
+                }
+            }
+            if !removals.isEmpty { try await stage(mutations: removals, target: target, for: runID) }
+        }
+        return result
+    }
+
+    private func observeSubtree(
+        _ batch: InventoryRecordBatch, root: RelativePath, target: InventoryMutationTarget,
+        runID: ScanRun.ID, seen: SubtreeSeenPaths, replacedDirectories: SubtreeSeenPaths
+    ) async throws {
+        try requireRunningRun(runID)
+        let descriptor = try resolve(target: target, runID: runID)
+        var mutations: [InventoryMutation] = []
+        let lookup = try overlayRecordStatement(descriptor: descriptor, runID: runID)
+        for record in batch.records {
+            try Task.checkCancellation()
+            guard record.path.volumeID == descriptor.volumeID,
+                PathPolicy.isEqual(record.path.relativePath, orDescendantOf: root)
+            else { throw StoreInvariantError.volumeMismatch }
+            try seen.insert(record.path.relativePath)
+            // Unlike delete-and-reinsert, unchanged records need no main-database write.
+            try lookup.bind(record.path.relativePath.bytes, at: 11)
+            let previous = try lookup.step() ? decodeInventoryRecord(from: lookup, startingAt: 0) : nil
+            try lookup.reset()
+            try bindOverlayIdentity(lookup, descriptor: descriptor, runID: runID)
+            if previous?.object.kind == .directory, record.object.kind == .directory,
+                previous?.object.identity != record.object.identity
+            {
+                try replacedDirectories.insert(record.path.relativePath)
+            }
+            if previous != record {
+                mutations.append(.upsert(record))
+            }
+        }
+        if !mutations.isEmpty { try await stage(mutations: mutations, target: target, for: runID) }
+    }
+
     public func preserveOpaqueSubtrees(
         roots: [RelativePath],
         from source: InventoryMutationTarget,
