@@ -7,6 +7,7 @@ import SwiftUI
 struct TrendChartView: View {
     let reports: [DailyReport]
     let highlighted: ReportIdentity?
+    var openReport: (DailyReport) -> Void = { _ in }
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hoveredIndex: Int?
@@ -36,6 +37,18 @@ struct TrendChartView: View {
                         Rectangle()
                             .fill(.clear)
                             .contentShape(Rectangle())
+                            .help("双击查看这次检查")
+                            .gesture(
+                                SpatialTapGesture(count: 2).onEnded { event in
+                                    guard
+                                        let index = Self.reportIndex(
+                                            at: event.location, plot: plot,
+                                            chartHeight: geometry.size.height, count: reports.count)
+                                    else { return }
+                                    hoveredIndex = nil
+                                    openReport(reports[index])
+                                }
+                            )
                             .onContinuousHover { phase in
                                 switch phase {
                                 case .active(let location):
@@ -68,6 +81,20 @@ struct TrendChartView: View {
                 }
             }
         }
+        .accessibilityRepresentation {
+            VStack {
+                ForEach(reports, id: \.reportIdentity) { report in
+                    Button {
+                        openReport(report)
+                    } label: {
+                        Text(
+                            "\(report.generatedAt.formatted(.dateTime.month().day().hour().minute()))，\(signedBytes(report.accounting.physicalUsedDelta ?? 0))"
+                        )
+                    }
+                    .accessibilityHint("查看这次检查的历史报告")
+                }
+            }
+        }
         .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: hoveredIndex)
         .onChange(of: reports.map(\.reportIdentity)) { _, _ in hoveredIndex = nil }
         .onDisappear { hoveredIndex = nil }
@@ -94,6 +121,16 @@ struct TrendChartView: View {
                 }
             }
         }
+    }
+
+    // Include the date labels below the plot, but exclude the value axis and outside margins.
+    static func reportIndex(at point: CGPoint, plot: CGRect, chartHeight: CGFloat, count: Int) -> Int? {
+        guard count > 0, plot.width > 0,
+            point.x >= plot.minX, point.x < plot.maxX,
+            point.y >= plot.minY, point.y <= chartHeight
+        else { return nil }
+        let index = Int((point.x - plot.minX) / plot.width * CGFloat(count))
+        return (0..<count).contains(index) ? index : nil
     }
 
     private func hoverCard(_ report: DailyReport) -> some View {

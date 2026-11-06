@@ -3,6 +3,8 @@ import SwiftUI
 
 struct HistoryView: View {
     @ObservedObject var controller: AppController
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var appeared = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -17,6 +19,11 @@ struct HistoryView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .opacity(appeared ? 1 : 0)
+        .offset(x: appeared || reduceMotion ? 0 : 8)
+        .onAppear {
+            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { appeared = true }
         }
         .background(Theme.content)
         .navigationTitle("历史")
@@ -35,13 +42,24 @@ struct HistoryView: View {
                 description: Text("完成一次检查后，报告会按日期保存在这里。")
             )
         } else {
-            List(selection: selection) {
-                ForEach(controller.reports, id: \.reportIdentity) { report in
-                    row(report).tag(report.reportIdentity)
+            ScrollViewReader { proxy in
+                List(selection: selection) {
+                    ForEach(controller.reports, id: \.reportIdentity) { report in
+                        row(report).tag(report.reportIdentity).id(report.reportIdentity)
+                    }
+                }
+                .listStyle(.inset)
+                .scrollContentBackground(.hidden)
+                .task(id: controller.selectedReport?.reportIdentity) {
+                    guard let identity = controller.selectedReport?.reportIdentity else { return }
+                    // Wait for the selected row to be installed before asking List to reveal it.
+                    await Task.yield()
+                    guard !Task.isCancelled else { return }
+                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.24)) {
+                        proxy.scrollTo(identity, anchor: .center)
+                    }
                 }
             }
-            .listStyle(.inset)
-            .scrollContentBackground(.hidden)
         }
     }
 

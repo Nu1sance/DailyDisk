@@ -245,3 +245,8 @@ An inaccessible temporary directory during the post-traversal event replay no lo
 DailyDisk retains the latest known records beneath unreadable roots and removes only paths whose absence was established outside those roots. This prevents false space-release entries. Retained sizes can be stale; an unreadable new directory has no inferred contents. A later successful subtree scan or the next daily full scan reconciles those paths once access returns. Full Disk Access still does not override POSIX/ACL/SIP restrictions.
 
 This does not suppress journal loss, hard I/O errors, unsafe mount changes, incomplete diagnostics, or an unreadable replacement directory with a different identity. Those conditions still fail safely without advancing the committed checkpoint. Small subtree rescans use bounded path tracking and skip writes for unchanged records; they do not copy the complete old subtree before scanning.
+
+
+### Open history from the overview chart
+
+Double-clicking a trend column (including its date label and plot whitespace) opens the exact report by run/domain identity in history, not merely a matching date. History reveals the selected row with a short scroll animation and a brief entrance transition; Reduce Motion disables these animations. Single clicks retain their existing behavior, and entering history hides paths. Each chart report also exposes an accessible open action.

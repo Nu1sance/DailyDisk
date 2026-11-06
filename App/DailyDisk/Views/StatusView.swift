@@ -170,8 +170,12 @@ struct StatusView: View {
                     SectionHeader("最近 \(trend.count) 次检查") {
                         Text("累计 \(signedBytes(trend.reduce(0) { $0 &+ ($1.accounting.physicalUsedDelta ?? 0) }))")
                     }
-                    TrendChartView(reports: trend, highlighted: report.reportIdentity)
-                        .frame(height: 120)
+                    TrendChartView(reports: trend, highlighted: report.reportIdentity) { selected in
+                        controller.setReportPathDisclosure(false)
+                        controller.selectReport(selected)
+                        showHistory()
+                    }
+                    .frame(height: 120)
                 }
             }
             if !report.isBaseline {
